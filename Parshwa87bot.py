@@ -16,9 +16,9 @@ TELEGRAM_CHAT_ID = "1177543310"
 # --- ALL MAJOR INDIAN INDICES + TOP STOCKS WATCHLIST ---
 def get_watchlist():
     return {
-        # 🔥 All Key Indian Indices (Yahoo Finance Symbols)
+        # 🔥 Corrected Yahoo Finance Symbols for Indian Indices
         "^NSEI": {"name": "NIFTY 50", "is_index": True, "index_type": "nifty"},
-        "^NSEMDCP50": {"name": "BANK NIFTY", "is_index": True, "index_type": "banknifty"},
+        "^NSEBANK": {"name": "BANK NIFTY", "is_index": True, "index_type": "banknifty"}, # <-- Fixed BankNifty Symbol Here
         "^BSESN": {"name": "SENSEX", "is_index": True, "index_type": "sensex"},
         "NIFTY_FIN_SERVICE.NS": {"name": "FIN NIFTY", "is_index": True, "index_type": "finnifty"},
         "NIFTY_MID_SELECT.NS": {"name": "MIDCAP NIFTY", "is_index": True, "index_type": "midcap"},
@@ -34,20 +34,13 @@ def get_watchlist():
 # --- AUTOMATIC STRIKE PRICE CALCULATOR FOR ALL INDICES & STOCKS ---
 def calculate_atm_strike(name, current_price, is_index, index_type):
     if is_index:
-        if index_type == "nifty":
-            base = 50       # Nifty 50 strike gap = 50
-        elif index_type == "banknifty":
-            base = 100      # Bank Nifty strike gap = 100
-        elif index_type == "sensex":
-            base = 100      # Sensex strike gap = 100
-        elif index_type == "finnifty":
-            base = 50       # Fin Nifty strike gap = 50
-        elif index_type == "midcap":
-            base = 25       # Midcap Nifty strike gap = 25
-        else:
-            base = 50
+        if index_type == "nifty": base = 50
+        elif index_type == "banknifty": base = 100
+        elif index_type == "sensex": base = 100
+        elif index_type == "finnifty": base = 50
+        elif index_type == "midcap": base = 25
+        else: base = 50
     else:
-        # Stock Rounding Rules
         if current_price > 5000: base = 100
         elif current_price > 2000: base = 50
         elif current_price > 1000: base = 20
@@ -58,8 +51,7 @@ def calculate_atm_strike(name, current_price, is_index, index_type):
 # --- QUANT ENGINE ---
 def scan_accurate_market():
     watchlist = get_watchlist()
-    
-    print(f"🔄 Scanning All Indices (Nifty, BankNifty, Sensex, FinNifty, Midcap) & Stocks...")
+    print(f"🔄 Scanning All Indices & Stocks...")
     
     for symbol, info in watchlist.items():
         try:
@@ -85,7 +77,6 @@ def scan_accurate_market():
             
             atm_strike = calculate_atm_strike(name, current_price, is_index, index_type)
             
-            # Risk Reward Adjustments based on Instrument
             if is_index:
                 target_mult = 2.0 if index_type in ["nifty", "finnifty", "midcap"] else 1.8
                 sl_mult = 1.2
@@ -97,11 +88,11 @@ def scan_accurate_market():
                 
             if est_premium < 2: est_premium = round(current_price * 0.01, 2)
 
+            msg = None
             # 🟢 RSI > 52 = BULLISH (BUY CALL / CE)
             if rsi_value > 52:
                 spot_target = round(current_price + (target_mult * atr_value), 2)
                 spot_sl = round(current_price - (sl_mult * atr_value), 2)
-                
                 premium_target = round(est_premium + ((spot_target - current_price) * 0.50), 2)
                 premium_sl = round(est_premium - ((current_price - spot_sl) * 0.50), 2)
                 if premium_sl < 1: premium_sl = round(est_premium * 0.4, 2)
@@ -118,13 +109,12 @@ def scan_accurate_market():
                        f"• Current Spot: ₹{current_price}\n"
                        f"• Spot Target: ₹{spot_target}\n"
                        f"• Spot StopLoss: ₹{spot_sl}\n\n"
-                       f"💡 *How to Trade:* Apne broker app mein **{name} {atm_strike} CE** ka Current Expiry contract kholiye.")
+                       f"💡 *How to Trade:* Apne broker app mein **{name} {atm_strike} CE** kholiye.")
             
             # 🔴 RSI < 48 = BEARISH (BUY PUT / PE)
             elif rsi_value < 48:
                 spot_target = round(current_price - (target_mult * atr_value), 2)
                 spot_sl = round(current_price + (sl_mult * atr_value), 2)
-                
                 premium_target = round(est_premium + ((current_price - spot_target) * 0.50), 2)
                 premium_sl = round(est_premium - ((spot_sl - current_price) * 0.50), 2)
                 if premium_sl < 1: premium_sl = round(est_premium * 0.4, 2)
@@ -141,24 +131,24 @@ def scan_accurate_market():
                        f"• Current Spot: ₹{current_price}\n"
                        f"• Spot Target: ₹{spot_target}\n"
                        f"• Spot StopLoss: ₹{spot_sl}\n\n"
-                       f"💡 *How to Trade:* Apne broker app mein **{name} {atm_strike} PE** ka Current Expiry contract kholiye.")
-            else:
-                continue
-                   
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-            time.sleep(1.5)
-            
+                       f"💡 *How to Trade:* Apne broker app mein **{name} {atm_strike} PE** kholiye.")
+
+            if msg:
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+                time.sleep(1.5)
+                
         except Exception as e:
-            print(f"Error scanning {name}: {e}")
+            print(f"Error scanning {symbol}: {e}")
 
 # --- MAIN RUNNER ---
-print("⚡ Ultra Hybrid Multi-Index F&O Engine Started...")
-IST = pytz.timezone('Asia/Kolkata')
-now = datetime.now(IST)
+if __name__ == "__main__":
+    print("⚡ Ultra Hybrid Multi-Index F&O Engine Started...")
+    IST = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(IST)
 
-if now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 30):
-    print(f"⏰ Market is Live. Running Full Scan: {now.strftime('%H:%M:%S')}")
-    scan_accurate_market()
-    print("Full multi-index scan completed successfully.")
-else:
-    print(f"💤 Market Closed or Weekend. Current India Time: {now.strftime('%H:%M')}. Skipping scan.")
+    if now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 30):
+        print(f"⏰ Market is Live. Running Full Scan: {now.strftime('%H:%M:%S')}")
+        scan_accurate_market()
+        print("Full multi-index scan completed successfully.")
+    else:
+        print(f"💤 Market Closed or Weekend. Current India Time: {now.strftime('%H:%M')}. Skipping scan.")
