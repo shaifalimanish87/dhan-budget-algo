@@ -2,9 +2,9 @@ name: Run Trading Bot Daily
 
 on:
   schedule:
-    - cron: '*/10 3-10 * * 1-5'
-  workflow_dispatch: # Manual test button
-  repository_dispatch: # 🔥 Yeh line bahar se auto-trigger karne ke liye hai
+    - cron: '*/10 4-10 * * 1-5' # Every 10 mins during market hours
+  workflow_dispatch: # Manual run button
+  repository_dispatch:
     types: [auto_trigger]
 
 jobs:
@@ -18,11 +18,12 @@ jobs:
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.13'
+        python-version: '3.11'
 
-    - name: Install Libraries
+    - name: Install Libraries Direct
       run: |
-        pip install -r requirements.txt
+        python -m pip install --upgrade pip
+        pip install yfinance pandas pandas-ta pytz requests
 
     - name: Run Script
-      run: python Parshwa87bot.py
+      run: python -u Parshwa87bot.py
