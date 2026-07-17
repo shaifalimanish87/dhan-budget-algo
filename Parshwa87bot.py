@@ -1,7 +1,8 @@
 import time
 import requests
 import pandas as pd
-import pandas_ta as ta
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange
 import yfinance as yf
 import pytz
 import warnings
@@ -18,7 +19,7 @@ def get_watchlist():
     return {
         # 🔥 Corrected Yahoo Finance Symbols for Indian Indices
         "^NSEI": {"name": "NIFTY 50", "is_index": True, "index_type": "nifty"},
-        "^NSEBANK": {"name": "BANK NIFTY", "is_index": True, "index_type": "banknifty"}, # <-- Fixed BankNifty Symbol Here
+        "^NSEBANK": {"name": "BANK NIFTY", "is_index": True, "index_type": "banknifty"},
         "^BSESN": {"name": "SENSEX", "is_index": True, "index_type": "sensex"},
         "NIFTY_FIN_SERVICE.NS": {"name": "FIN NIFTY", "is_index": True, "index_type": "finnifty"},
         "NIFTY_MID_SELECT.NS": {"name": "MIDCAP NIFTY", "is_index": True, "index_type": "midcap"},
@@ -63,13 +64,15 @@ def scan_accurate_market():
             if df.empty or len(df) < 30:
                 continue
 
+            # Standard clean column structure
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = [col[0].lower() for col in df.columns]
             else:
                 df.columns = [col.lower() for col in df.columns]
 
-            rsi_series = ta.rsi(df['close'], length=14)
-            atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
+            # Using standard 'ta' library indicators
+            rsi_series = RSIIndicator(close=df['close'], window=14).rsi()
+            atr_series = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
 
             current_price = round(float(df['close'].iloc[-2]), 2)
             rsi_value = float(rsi_series.iloc[-2]) if not pd.isna(rsi_series.iloc[-2]) else 50.0
