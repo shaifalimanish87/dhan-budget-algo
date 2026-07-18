@@ -1,157 +1,142 @@
+import os
 import time
 import requests
 import pandas as pd
 from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
-import yfinance as yf
+from ta.trend import EMAIndicator
+from dhanhq import dhanhq as DhanClient
+from dhanhq.dhan_context import DhanContext
 import pytz
-import warnings
 from datetime import datetime
 
-warnings.filterwarnings("ignore", category=FutureWarning)
+# ==================== CONFIGURATION ====================
+# Yeh tokens GitHub Secrets se uthayega
+CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- CONFIGURATION ---
-TELEGRAM_BOT_TOKEN = "8987958487:AAHaPpZD2C4GRJ-Eu8JYPPLQxYVjSb8Aegk"
-TELEGRAM_CHAT_ID = "1177543310"
+# Dhan Connection Setup
+context = DhanContext(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
+dhan = DhanClient(context)
 
-# --- ALL MAJOR INDIAN INDICES + TOP STOCKS WATCHLIST ---
-def get_watchlist():
-    return {
-        # 🔥 Corrected Yahoo Finance Symbols for Indian Indices
-        "^NSEI": {"name": "NIFTY 50", "is_index": True, "index_type": "nifty"},
-        "^NSEBANK": {"name": "BANK NIFTY", "is_index": True, "index_type": "banknifty"},
-        "^BSESN": {"name": "SENSEX", "is_index": True, "index_type": "sensex"},
-        "NIFTY_FIN_SERVICE.NS": {"name": "FIN NIFTY", "is_index": True, "index_type": "finnifty"},
-        "NIFTY_MID_SELECT.NS": {"name": "MIDCAP NIFTY", "is_index": True, "index_type": "midcap"},
-        
-        # Top Stocks for F&O
-        "RELIANCE.NS": {"name": "RELIANCE", "is_index": False, "index_type": None},
-        "TCS.NS": {"name": "TCS", "is_index": False, "index_type": None},
-        "HDFCBANK.NS": {"name": "HDFCBANK", "is_index": False, "index_type": None},
-        "SBIN.NS": {"name": "SBIN", "is_index": False, "index_type": None},
-        "ICICIBANK.NS": {"name": "ICICIBANK", "is_index": False, "index_type": None}
-    }
+# Watchlist mapped with Dhan Security IDs
+MONITOR_INDICES = {
+    "NIFTY 50": {"security_id": "13", "lot_size": 75},
+    "BANK NIFTY": {"security_id": "25", "lot_size": 15},
+    "FIN NIFTY": {"security_id": "27", "lot_size": 40}
+}
 
-# --- AUTOMATIC STRIKE PRICE CALCULATOR FOR ALL INDICES & STOCKS ---
-def calculate_atm_strike(name, current_price, is_index, index_type):
-    if is_index:
-        if index_type == "nifty": base = 50
-        elif index_type == "banknifty": base = 100
-        elif index_type == "sensex": base = 100
-        elif index_type == "finnifty": base = 50
-        elif index_type == "midcap": base = 25
-        else: base = 50
-    else:
-        if current_price > 5000: base = 100
-        elif current_price > 2000: base = 50
-        elif current_price > 1000: base = 20
-        else: base = 10
-        
-    return int(base * round(current_price / base))
+def send_telegram_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    try: 
+        requests.post(url, json=payload)
+    except Exception as e: 
+        print(f"Telegram error: {e}")
 
-# --- QUANT ENGINE ---
-def scan_accurate_market():
-    watchlist = get_watchlist()
-    print(f"🔄 Scanning All Indices & Stocks...")
-    
-    for symbol, info in watchlist.items():
-        try:
-            name = info["name"]
-            is_index = info["is_index"]
-            index_type = info["index_type"]
-            
-            df = yf.download(symbol, period="2d", interval="5m", progress=False)
-            if df.empty or len(df) < 30:
-                continue
+def get_live_ohlc(security_id, interval):
+    try:
+        tz_now = pd.Timestamp.now(tz='Asia/Kolkata')
+        today_str = tz_now.strftime('%Y-%m-%d')
+        data = dhan.get_historical_data(
+            security_id=str(security_id),
+            exchange_segment="NSE_EQUITY", 
+            instrument_type="INDEX",
+            expiry_code=0,
+            from_date=today_str,
+            to_date=today_str,
+            interval=str(interval)
+        )
+        if data and data.get('status') == 'success':
+            return pd.DataFrame(data['data'])
+    except Exception as e:
+        print(f"OHLC Error for {security_id}: {e}")
+    return pd.DataFrame()
 
-            # Standard clean column structure
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [col[0].lower() for col in df.columns]
-            else:
-                df.columns = [col.lower() for col in df.columns]
-
-            # Using standard 'ta' library indicators
-            rsi_series = RSIIndicator(close=df['close'], window=14).rsi()
-            atr_series = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
-
-            current_price = round(float(df['close'].iloc[-2]), 2)
-            rsi_value = float(rsi_series.iloc[-2]) if not pd.isna(rsi_series.iloc[-2]) else 50.0
-            atr_value = float(atr_series.iloc[-2]) if not pd.isna(atr_series.iloc[-2]) else current_price * 0.002
-            
-            atm_strike = calculate_atm_strike(name, current_price, is_index, index_type)
-            
-            if is_index:
-                target_mult = 2.0 if index_type in ["nifty", "finnifty", "midcap"] else 1.8
-                sl_mult = 1.2
-                est_premium = round(atr_value * 1.4, 2)
-            else:
-                target_mult = 2.5
-                sl_mult = 1.5
-                est_premium = round(atr_value * 1.2, 2)
-                
-            if est_premium < 2: est_premium = round(current_price * 0.01, 2)
-
-            msg = None
-            # 🟢 RSI > 52 = BULLISH (BUY CALL / CE)
-            if rsi_value > 52:
-                spot_target = round(current_price + (target_mult * atr_value), 2)
-                spot_sl = round(current_price - (sl_mult * atr_value), 2)
-                premium_target = round(est_premium + ((spot_target - current_price) * 0.50), 2)
-                premium_sl = round(est_premium - ((current_price - spot_sl) * 0.50), 2)
-                if premium_sl < 1: premium_sl = round(est_premium * 0.4, 2)
-                
-                msg = (f"⭐ *ACCURATE F&O SIGNAL* ⭐\n\n"
-                       f"🟢 *ACTION: BUY CALL (CE)* 🚀\n"
-                       f"👉 **{name} {atm_strike} CE**\n"
-                       f"-------------------------\n"
-                       f"💵 *Expected Premium Entry:* ₹{est_premium}\n"
-                       f"🎯 *Premium Target:* ₹{premium_target}\n"
-                       f"🛑 *Premium StopLoss:* ₹{premium_sl}\n"
-                       f"-------------------------\n"
-                       f"📈 _[Spot Chart Reference]_\n"
-                       f"• Current Spot: ₹{current_price}\n"
-                       f"• Spot Target: ₹{spot_target}\n"
-                       f"• Spot StopLoss: ₹{spot_sl}\n\n"
-                       f"💡 *How to Trade:* Apne broker app mein **{name} {atm_strike} CE** kholiye.")
-            
-            # 🔴 RSI < 48 = BEARISH (BUY PUT / PE)
-            elif rsi_value < 48:
-                spot_target = round(current_price - (target_mult * atr_value), 2)
-                spot_sl = round(current_price + (sl_mult * atr_value), 2)
-                premium_target = round(est_premium + ((current_price - spot_target) * 0.50), 2)
-                premium_sl = round(est_premium - ((spot_sl - current_price) * 0.50), 2)
-                if premium_sl < 1: premium_sl = round(est_premium * 0.4, 2)
-                
-                msg = (f"⭐ *ACCURATE F&O SIGNAL* ⭐\n\n"
-                       f"🔴 *ACTION: BUY PUT (PE)* ⚠️\n"
-                       f"👉 **{name} {atm_strike} PE**\n"
-                       f"-------------------------\n"
-                       f"💵 *Expected Premium Entry:* ₹{est_premium}\n"
-                       f"🎯 *Premium Target:* ₹{premium_target}\n"
-                       f"🛑 *Premium StopLoss:* ₹{premium_sl}\n"
-                       f"-------------------------\n"
-                       f"📈 _[Spot Chart Reference]_\n"
-                       f"• Current Spot: ₹{current_price}\n"
-                       f"• Spot Target: ₹{spot_target}\n"
-                       f"• Spot StopLoss: ₹{spot_sl}\n\n"
-                       f"💡 *How to Trade:* Apne broker app mein **{name} {atm_strike} PE** kholiye.")
-
-            if msg:
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-                time.sleep(1.5)
-                
-        except Exception as e:
-            print(f"Error scanning {symbol}: {e}")
-
-# --- MAIN RUNNER ---
-if __name__ == "__main__":
-    print("⚡ Ultra Hybrid Multi-Index F&O Engine Started...")
+def run_trading_engine():
+    print("🚀 DHAN LIVE ENGINE STARTED...")
     IST = pytz.timezone('Asia/Kolkata')
     now = datetime.now(IST)
+    
+    # Live market hours check (9:15 AM to 3:30 PM)
+    if now.weekday() >= 5 or now.hour < 9 or (now.hour == 9 and now.minute < 15) or (now.hour >= 15 and now.minute > 30):
+        print("💤 Market is closed. Skipping live scan.")
+        return
 
-    if now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 30):
-        print(f"⏰ Market is Live. Running Full Scan: {now.strftime('%H:%M:%S')}")
-        scan_accurate_market()
-        print("Full multi-index scan completed successfully.")
-    else:
-        print(f"💤 Market Closed or Weekend. Current India Time: {now.strftime('%H:%M')}. Skipping scan.")
+    # Morning Welcome Message (Only once between 9:15-9:35 AM)
+    if now.hour == 9 and 15 <= now.minute <= 35:
+        welcome_msg = (
+            f"☀️ *🤖 DHAN LIVE ALGO ONLINE (MARKET OPEN) 🤖*\n"
+            f"-------------------------------------\n"
+            f"🛡️ Premium Bracket: ₹1 to ₹100 Strict\n"
+            f"⚡ Data Feed: Real-time Dhan API\n"
+            f"⏰ Trigger Time: {now.strftime('%H:%M:%S')} IST\n"
+            f"-------------------------------------\n"
+            f"🚀 _Scan mode active. Alerts shuru ho rahe hain!_"
+        )
+        send_telegram_alert(welcome_msg)
+        time.sleep(2)
+
+    for index_name, info in MONITOR_INDICES.items():
+        sec_id = info["security_id"]
+        lot_size = info["lot_size"]
+
+        df_5m = get_live_ohlc(sec_id, 5)
+        df_15m = get_live_ohlc(sec_id, 15)
+
+        if df_5m.empty or len(df_5m) < 15 or df_15m.empty:
+            continue
+
+        rsi_5m = RSIIndicator(close=df_5m['close'], window=14).rsi().iloc[-1]
+        rsi_15m = RSIIndicator(close=df_15m['close'], window=14).rsi().iloc[-1]
+        current_ema_50 = EMAIndicator(close=df_5m['close'], window=50).ema_indicator().iloc[-1]
+        current_spot = df_5m['close'].iloc[-1]
+
+        try:
+            chain = dhan.get_option_chain(security_id=str(sec_id), exchange_segment="NSE_FNO")
+            if not chain or chain.get('status') != 'success':
+                continue
+            chain_df = pd.DataFrame(chain['data'])
+        except Exception as e:
+            continue
+
+        total_call_oi = chain_df[chain_df['option_type'] == 'CE']['open_interest'].sum()
+        total_put_oi = chain_df[chain_df['option_type'] == 'PE']['open_interest'].sum()
+        pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
+        
+        signal = None
+        if rsi_5m > 51 and rsi_15m > 50 and current_spot > current_ema_50 and pcr > 1.05:
+            signal = "CE"
+        elif rsi_5m < 49 and rsi_15m < 48 and current_spot < current_ema_50 and pcr < 0.95:
+            signal = "PE"
+
+        if signal:
+            # ₹1 - ₹100 Premium Filter
+            budget_contracts = chain_df[(chain_df['option_type'] == signal) & (chain_df['last_traded_price'] >= 1) & (chain_df['last_traded_price'] <= 100)]
+            
+            if not budget_contracts.empty:
+                best_contract = budget_contracts.sort_values(by='last_traded_price', ascending=False).iloc[0]
+                live_premium = best_contract['last_traded_price']
+                strike_price = best_contract['strike_price']
+                total_lot_cost = round(live_premium * lot_size, 2)
+                
+                target_premium = round(live_premium * 1.30, 2)
+                sl_premium = round(live_premium * 0.85, 2)
+                
+                msg = (
+                    f"🎯 *🔥 REAL-TIME DHAN SIGNAL (₹1-₹100) 🔥*\n"
+                    f"-------------------------------------\n"
+                    f"📈 *Action:* BUY {index_name} {strike_price} {signal}\n"
+                    f"💵 *Live Premium:* ₹{live_premium}\n"
+                    f"📦 *Total Lot Cost:* ₹{total_lot_cost}\n"
+                    f"-------------------------------------\n"
+                    f"🎯 *Target (30%):* ₹{target_premium}\n"
+                    f"🛑 *StopLoss (15%):* ₹{sl_premium}\n"
+                    f"-------------------------------------\n"
+                    f"⏱️ RSI 5m: {rsi_5m:.1f} | 15m: {rsi_15m:.1f} | Real PCR: {pcr:.2f}"
+                )
+                send_telegram_alert(msg)
+
+if __name__ == "__main__":
+    run_trading_engine()
