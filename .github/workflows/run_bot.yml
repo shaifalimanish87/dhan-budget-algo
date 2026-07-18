@@ -10,11 +10,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # Changed from v4 to latest v4 patch/v5 compatibility for Node 24 support
     - name: Checkout Code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4.2.2 
 
+    # Changed from v5 to latest v5 patch for updated runner compatibility
     - name: Setup Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v5.3.0
       with:
         python-version: '3.10'
 
