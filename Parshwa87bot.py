@@ -38,24 +38,45 @@ def get_live_ohlc(security_id, interval):
         tz_now = pd.Timestamp.now(tz='Asia/Kolkata')
         today_str = tz_now.strftime('%Y-%m-%d')
         
-        # Official Dhan SDK Method for Minute Historical Data
+        from_datetime = f"{today_str} 09:15:00"
+        to_datetime = f"{today_str} 15:30:00"
+        
+        # Dhan Official Intraday Minute Chart Endpoint
         data = dhan.historical_minute_charts(
             security_id=str(security_id),
-            exchange_segment="NSE_EQUITY", 
+            exchange_segment="IDX_I",  # Index Segment Code in Dhan
             instrument_type="INDEX",
-            expiry_code=0,
-            from_date=today_str,
-            to_date=today_str
+            from_date=from_datetime,
+            to_date=to_datetime
         )
         
-        if data and data.get('status') == 'success' and 'data' in data:
+        # Fallback if IDX_I is strict
+        if not data or data.get('status') != 'success' or 'data' not in data or not data['data']:
+            data = dhan.historical_minute_charts(
+                security_id=str(security_id),
+                exchange_segment="NSE_FNO",
+                instrument_type="INDEX",
+                from_date=from_datetime,
+                to_date=to_datetime
+            )
+        
+        if data and data.get('status') == 'success' and 'data' in data and data['data']:
             df = pd.DataFrame(data['data'])
             
+            # Handling timestamp or datetime columns
             if 'start_time' in df.columns:
                 df['start_time'] = pd.to_datetime(df['start_time'], unit='s')
                 df.set_index('start_time', inplace=True)
-            
-            # Resample 1-minute data into 5-minute or 15-minute candles
+            elif 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                df.set_index('timestamp', inplace=True)
+
+            # Ensure numeric OHLC columns
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Resample 1-minute candles to required interval (5m / 15m)
             if str(interval) != '1':
                 resampled_df = df.resample(f'{interval}min').agg({
                     'open': 'first',
@@ -69,7 +90,7 @@ def get_live_ohlc(security_id, interval):
             return df.reset_index()
             
     except Exception as e:
-        print(f"OHLC Error for {security_id}: {e}")
+        print(f"OHLC Exception for {security_id}: {e}")
     return pd.DataFrame()
 
 def run_trading_scan():
@@ -86,7 +107,7 @@ def run_trading_scan():
         df_15m = get_live_ohlc(sec_id, 15)
 
         if df_5m.empty or df_15m.empty:
-            scan_summary.append(f"⚠️ *{index_name}*: Data Empty / Market Closed")
+            scan_summary.append(f"⚠️ *{index_name}*: Data Empty / Dhan API Delay")
             continue
 
         rsi_5m = RSIIndicator(close=df_5m['close'], window=14).rsi().iloc[-1]
@@ -108,7 +129,7 @@ def run_trading_scan():
         total_put_oi = chain_df[chain_df['option_type'] == 'PE']['open_interest'].sum()
         pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
         
-        # Live Scan Diagnostic Log
+        # Diagnostic Log
         scan_summary.append(
             f"📊 *{index_name}*: Spot ₹{current_spot:.1f} | RSI 5m: {rsi_5m:.1f} | PCR: {pcr:.2f}"
         )
@@ -146,7 +167,6 @@ def run_trading_scan():
                 )
                 send_telegram_alert(msg)
 
-    # Diagnostic Report Output to Telegram
     if scan_summary:
         report = "🔍 *DHAN LIVE SCAN REPORT*\n" + "\n".join(scan_summary)
         send_telegram_alert(report)
