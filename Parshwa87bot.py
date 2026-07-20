@@ -36,34 +36,33 @@ def send_telegram_alert(message):
 
 def get_live_ohlc(security_id, exchange_seg, interval):
     try:
-        tz_now = pd.Timestamp.now(tz='Asia/Kolkata')
-        today_str = tz_now.strftime('%Y-%m-%d')
-        
-        from_datetime = f"{today_str} 09:15:00"
-        to_datetime = f"{today_str} 15:30:00"
-        
-        # Dhan HQ Official Intraday Chart Method
-        res = dhan.historical_minute_charts(
+        # Method 1: Official Dhan Intraday Daily Minute Charts API
+        res = dhan.intraday_daily_minute_charts(
             security_id=str(security_id),
             exchange_segment=exchange_seg,
-            instrument_type="INDEX",
-            from_date=from_datetime,
-            to_date=to_datetime
+            instrument_type="INDEX"
         )
         
+        # Fallback Method 2: If exchange_segment needs NSE_FNO
+        if not res or res.get('status') != 'success' or 'data' not in res:
+            res = dhan.intraday_daily_minute_charts(
+                security_id=str(security_id),
+                exchange_segment="NSE_FNO",
+                instrument_type="INDEX"
+            )
+
         df = pd.DataFrame()
         
-        # Checking multiple possible response structures from Dhan HQ SDK
-        if isinstance(res, dict) and res.get('status') == 'success':
-            if 'data' in res and res['data']:
-                df = pd.DataFrame(res['data'])
-            elif 'start_time' in res or 'close' in res:
-                df = pd.DataFrame(res)
-        elif isinstance(res, list):
-            df = pd.DataFrame(res)
-            
+        if isinstance(res, dict) and res.get('status') == 'success' and 'data' in res:
+            data_content = res['data']
+            # Dhan returns dict of arrays: {'open': [...], 'close': [...], 'start_time': [...]}
+            if isinstance(data_content, dict):
+                df = pd.DataFrame(data_content)
+            elif isinstance(data_content, list):
+                df = pd.DataFrame(data_content)
+                
         if not df.empty:
-            # Timestamp Parsing
+            # Timestamp conversion
             if 'start_time' in df.columns:
                 df['start_time'] = pd.to_datetime(df['start_time'], unit='s')
                 df.set_index('start_time', inplace=True)
@@ -71,12 +70,12 @@ def get_live_ohlc(security_id, exchange_seg, interval):
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 df.set_index('timestamp', inplace=True)
 
-            # Ensure numeric OHLC columns
+            # Convert OHLC columns to float
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
 
-            # Resample 1-minute candles to required interval (5m / 15m)
+            # Resample 1-min candles to target timeframe (5m / 15m)
             if str(interval) != '1':
                 resampled_df = df.resample(f'{interval}min').agg({
                     'open': 'first',
