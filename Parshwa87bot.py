@@ -19,11 +19,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 context = DhanContext(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
 dhan = DhanClient(context)
 
-# Official Dhan Index Security Mapping
+# Official Dhan Index Security Mapping (Numeric Integer IDs)
 MONITOR_INDICES = {
-    "NIFTY 50": {"security_id": "13", "exchange_segment": "IDX_I", "lot_size": 75},
-    "BANK NIFTY": {"security_id": "25", "exchange_segment": "IDX_I", "lot_size": 15},
-    "FIN NIFTY": {"security_id": "27", "exchange_segment": "IDX_I", "lot_size": 40}
+    "NIFTY 50": {"security_id": 13, "exchange_segment": "IDX_I", "lot_size": 75},
+    "BANK NIFTY": {"security_id": 25, "exchange_segment": "IDX_I", "lot_size": 15},
+    "FIN NIFTY": {"security_id": 27, "exchange_segment": "IDX_I", "lot_size": 40}
 }
 
 def send_telegram_alert(message):
@@ -34,12 +34,32 @@ def send_telegram_alert(message):
     except Exception as e: 
         print(f"Telegram error: {e}")
 
+def get_option_chain_data(security_id):
+    """Safe Option Chain Fetcher with error handling"""
+    try:
+        # Dhan HQ SDK v2 accepts integer security_id
+        res = dhan.get_option_chain(
+            security_id=int(security_id),
+            exchange_segment="NSE_FNO"
+        )
+        if isinstance(res, dict) and res.get('status') == 'success' and 'data' in res:
+            data = res['data']
+            if isinstance(data, dict) and 'oc' in data:
+                # Some Dhan versions embed contracts inside 'oc' key
+                return pd.DataFrame(data['oc'])
+            elif isinstance(data, list):
+                return pd.DataFrame(data)
+            return pd.DataFrame(data)
+    except Exception as e:
+        print(f"Option Chain Error for {security_id}: {e}")
+    return pd.DataFrame()
+
 def get_live_ohlc(security_id, exchange_seg, interval):
+    """Fetch Historical / Intraday Minute Chart"""
     try:
         tz_now = pd.Timestamp.now(tz='Asia/Kolkata')
         today_str = tz_now.strftime('%Y-%m-%d')
         
-        # Official Dhan Method for Index Historical Minute Chart
         res = dhan.historical_minute_charts(
             security_id=str(security_id),
             exchange_segment=exchange_seg,
@@ -49,18 +69,14 @@ def get_live_ohlc(security_id, exchange_seg, interval):
         )
 
         df = pd.DataFrame()
-        
         if isinstance(res, dict) and res.get('status') == 'success' and 'data' in res:
             data_content = res['data']
-            
-            # Dhan returns dict of lists: {'open': [...], 'close': [...], 'start_time': [...]}
             if isinstance(data_content, dict):
                 df = pd.DataFrame(data_content)
             elif isinstance(data_content, list):
                 df = pd.DataFrame(data_content)
                 
         if not df.empty:
-            # Handle timestamps
             if 'start_time' in df.columns:
                 df['start_time'] = pd.to_datetime(df['start_time'], unit='s')
                 df.set_index('start_time', inplace=True)
@@ -72,7 +88,6 @@ def get_live_ohlc(security_id, exchange_seg, interval):
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
 
-            # Resample 1-minute to 5-minute / 15-minute
             if str(interval) != '1':
                 resampled_df = df.resample(f'{interval}min').agg({
                     'open': 'first',
@@ -100,66 +115,29 @@ def run_trading_scan():
         exch_seg = info["exchange_segment"]
         lot_size = info["lot_size"]
 
-        # Option Chain API Check (Primary Data Source)
-        try:
-            chain = dhan.get_option_chain(security_id=str(sec_id), exchange_segment="NSE_FNO")
-            if not chain or chain.get('status') != 'success' or 'data' not in chain:
-                scan_summary.append(f"⚠️ *{index_name}*: Option Chain API Failed")
-                continue
-            chain_df = pd.DataFrame(chain['data'])
-        except Exception as e:
-            scan_summary.append(f"⚠️ *{index_name}*: Chain Exception")
-            continue
+        # Option Chain Fetch
+        chain_df = get_option_chain_data(sec_id)
+        
+        pcr = 1.0
+        has_chain = False
+        
+        if not chain_df.empty and 'option_type' in chain_df.columns and 'open_interest' in chain_df.columns:
+            has_chain = True
+            total_call_oi = chain_df[chain_df['option_type'] == 'CE']['open_interest'].sum()
+            total_put_oi = chain_df[chain_df['option_type'] == 'PE']['open_interest'].sum()
+            pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
 
-        total_call_oi = chain_df[chain_df['option_type'] == 'CE']['open_interest'].sum()
-        total_put_oi = chain_df[chain_df['option_type'] == 'PE']['open_interest'].sum()
-        pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
-
-        # Try Fetching OHLC Candles
+        # OHLC Candles Fetch
         df_5m = get_live_ohlc(sec_id, exch_seg, 5)
         df_15m = get_live_ohlc(sec_id, exch_seg, 15)
 
-        # Fallback Strategy: Option Chain PCR Based Scanning
-        if df_5m.empty or df_15m.empty or len(df_5m) < 5:
-            # If historical minute charts fail, fallback to direct Option Chain Sentiment Scan
-            scan_summary.append(
-                f"📊 *{index_name}*: PCR: {pcr:.2f} | (Chart Data Syncing...)"
-            )
-            
-            # Smart Signal without chart dependency when PCR is very strong
-            signal = None
-            if pcr > 1.20:
-                signal = "CE"
-            elif pcr < 0.80:
-                signal = "PE"
-
-            if signal:
-                budget_contracts = chain_df[(chain_df['option_type'] == signal) & (chain_df['last_traded_price'] >= 1) & (chain_df['last_traded_price'] <= 200)]
-                if not budget_contracts.empty:
-                    best_contract = budget_contracts.sort_values(by='last_traded_price', ascending=False).iloc[0]
-                    live_premium = best_contract['last_traded_price']
-                    strike_price = best_contract['strike_price']
-                    total_lot_cost = round(live_premium * lot_size, 2)
-                    
-                    target_premium = round(live_premium * 1.30, 2)
-                    sl_premium = round(live_premium * 0.85, 2)
-                    
-                    msg = (
-                        f"🎯 *🔥 REAL-TIME DHAN SIGNAL (PCR BREAKOUT) 🔥*\n"
-                        f"-------------------------------------\n"
-                        f"📈 *Action:* BUY {index_name} {strike_price} {signal}\n"
-                        f"💵 *Live Premium:* ₹{live_premium}\n"
-                        f"📦 *Total Lot Cost:* ₹{total_lot_cost}\n"
-                        f"-------------------------------------\n"
-                        f"🎯 *Target (30%):* ₹{target_premium}\n"
-                        f"🛑 *StopLoss (15%):* ₹{sl_premium}\n"
-                        f"-------------------------------------\n"
-                        f"⏱️ Real PCR: {pcr:.2f} (Extreme OI Shift Detected)"
-                    )
-                    send_telegram_alert(msg)
+        if df_5m.empty or df_15m.empty or len(df_5m) < 3:
+            if has_chain:
+                scan_summary.append(f"📊 *{index_name}*: PCR: {pcr:.2f} | (Chart Syncing...)")
+            else:
+                scan_summary.append(f"⚠️ *{index_name}*: API Response Delay")
             continue
 
-        # Primary RSI + EMA Calculation
         rsi_5m = RSIIndicator(close=df_5m['close'], window=14).rsi().iloc[-1]
         rsi_15m = RSIIndicator(close=df_15m['close'], window=14).rsi().iloc[-1]
         current_ema_50 = EMAIndicator(close=df_5m['close'], window=50).ema_indicator().iloc[-1]
@@ -175,13 +153,13 @@ def run_trading_scan():
         elif rsi_5m < 50 and rsi_15m < 50 and current_spot < current_ema_50 and pcr < 1.0:
             signal = "PE"
 
-        if signal:
+        if signal and has_chain and 'last_traded_price' in chain_df.columns:
             budget_contracts = chain_df[(chain_df['option_type'] == signal) & (chain_df['last_traded_price'] >= 1) & (chain_df['last_traded_price'] <= 200)]
             
             if not budget_contracts.empty:
                 best_contract = budget_contracts.sort_values(by='last_traded_price', ascending=False).iloc[0]
                 live_premium = best_contract['last_traded_price']
-                strike_price = best_contract['strike_price']
+                strike_price = best_contract.get('strike_price', 'ATM')
                 total_lot_cost = round(live_premium * lot_size, 2)
                 
                 target_premium = round(live_premium * 1.30, 2)
