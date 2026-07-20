@@ -2,11 +2,9 @@ name: Run Trading Bot Daily
 
 on:
   schedule:
-    # IST 9:15 AM to 3:30 PM (UTC 3:45 AM to 10:00 AM)
-    - cron: '15,25,35,45,55 3 * * 1-5'
-    - cron: '5,15,25,35,45,55 4-9 * * 1-5'
-    - cron: '5,15,25 10 * * 1-5'
-  workflow_dispatch:
+    # ⏱️ Monday to Friday (Indian Time: 9:15 AM to 3:30 PM ke beech har 10 minute mein automatic chalega)
+    - cron: '*/10 3-10 * * 1-5'
+  workflow_dispatch: # Manual test button jab chahe tab click karke chalane ke liye
 
 jobs:
   run-bot:
@@ -14,21 +12,21 @@ jobs:
 
     steps:
     - name: Checkout Code
-      uses: actions/checkout@v4.2.2
+      uses: actions/checkout@v4
 
     - name: Setup Python
-      uses: actions/setup-python@v5.3.0
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
     - name: Install Libraries
       run: |
         python -m pip install --upgrade pip
-        pip install dhanhq pandas ta pytz requests
+        pip install dhanhq pandas ta python-dotenv requests
 
     - name: Run Script
       env:
-        DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+        DHAN_CLIENT_ID: "1112617852"
         DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
