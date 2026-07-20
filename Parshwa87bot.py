@@ -1,159 +1,130 @@
 import os
-import time
 import requests
 import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 from dhanhq import dhanhq as DhanClient
 from dhanhq.dhan_context import DhanContext
-import pytz
-from datetime import datetime
+from dotenv import load_dotenv
 
-# ==================== CONFIGURATION (GitHub Secrets) ====================
-CLIENT_ID = os.environ.get("DHAN_CLIENT_ID")
-ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+load_dotenv()
 
-# Dhan Context & Client Setup
+# ==================== CONFIGURATION ====================
+CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
+ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+if not ACCESS_TOKEN:
+    raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
+
 context = DhanContext(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
 dhan = DhanClient(context)
 
-# Official Dhan Index Security Mapping (Numeric Integer IDs)
 MONITOR_INDICES = {
-    "NIFTY 50": {"security_id": 13, "exchange_segment": "IDX_I", "lot_size": 75},
-    "BANK NIFTY": {"security_id": 25, "exchange_segment": "IDX_I", "lot_size": 15},
-    "FIN NIFTY": {"security_id": 27, "exchange_segment": "IDX_I", "lot_size": 40}
+    "NIFTY": {"security_id": "13", "exchange_segment": "IDX_I", "lot_size": 75},
+    "BANKNIFTY": {"security_id": "25", "exchange_segment": "IDX_I", "lot_size": 15}
 }
 
 def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try: 
-        requests.post(url, json=payload)
+        r = requests.post(url, json=payload)
+        print(f"Telegram API Response Status: {r.status_code}")
     except Exception as e: 
         print(f"Telegram error: {e}")
 
-def get_option_chain_data(security_id):
-    """Safe Option Chain Fetcher with error handling"""
+def fetch_option_chain_data(security_id):
     try:
-        # Dhan HQ SDK v2 accepts integer security_id
-        res = dhan.get_option_chain(
-            security_id=int(security_id),
-            exchange_segment="NSE_FNO"
-        )
-        if isinstance(res, dict) and res.get('status') == 'success' and 'data' in res:
-            data = res['data']
-            if isinstance(data, dict) and 'oc' in data:
-                # Some Dhan versions embed contracts inside 'oc' key
-                return pd.DataFrame(data['oc'])
-            elif isinstance(data, list):
-                return pd.DataFrame(data)
-            return pd.DataFrame(data)
-    except Exception as e:
-        print(f"Option Chain Error for {security_id}: {e}")
-    return pd.DataFrame()
+        chain = dhan.get_option_chain(security_id=int(security_id), exchange_segment="NSE_FNO")
+        if chain and chain.get('status') == 'success' and 'data' in chain:
+            df = pd.DataFrame(chain['data'])
+            total_call_oi = df[df['option_type'] == 'CE']['open_interest'].sum()
+            total_put_oi = df[df['option_type'] == 'PE']['open_interest'].sum()
+            pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
+            return pcr, df
+    except Exception as e: 
+        print(f"Option Chain Error: {e}")
+    return 1.0, None
 
 def get_live_ohlc(security_id, exchange_seg, interval):
-    """Fetch Historical / Intraday Minute Chart"""
     try:
         tz_now = pd.Timestamp.now(tz='Asia/Kolkata')
         today_str = tz_now.strftime('%Y-%m-%d')
         
-        res = dhan.historical_minute_charts(
+        # Correct Official Dhan HQ SDK Method
+        data = dhan.historical_minute_charts(
             security_id=str(security_id),
-            exchange_segment=exchange_seg,
+            exchange_segment=exchange_seg, 
             instrument_type="INDEX",
             from_date=today_str,
             to_date=today_str
         )
-
-        df = pd.DataFrame()
-        if isinstance(res, dict) and res.get('status') == 'success' and 'data' in res:
-            data_content = res['data']
-            if isinstance(data_content, dict):
-                df = pd.DataFrame(data_content)
-            elif isinstance(data_content, list):
-                df = pd.DataFrame(data_content)
-                
-        if not df.empty:
+        
+        if data and data.get('status') == 'success' and 'data' in data:
+            df = pd.DataFrame(data['data'])
             if 'start_time' in df.columns:
                 df['start_time'] = pd.to_datetime(df['start_time'], unit='s')
                 df.set_index('start_time', inplace=True)
-            elif 'timestamp' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                df.set_index('timestamp', inplace=True)
-
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-
+            
+            # Resample 1-min data to 5-min or 15-min interval
             if str(interval) != '1':
                 resampled_df = df.resample(f'{interval}min').agg({
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'volume': 'sum'
+                    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
                 }).dropna().reset_index()
                 return resampled_df
-            
             return df.reset_index()
-            
-    except Exception as e:
-        print(f"OHLC Exception for {security_id}: {e}")
+    except Exception as e: 
+        print(f"OHLC Error for {security_id}: {e}")
     return pd.DataFrame()
 
-def run_trading_scan():
-    IST = pytz.timezone('Asia/Kolkata')
-    now = datetime.now(IST)
+def run_trading_engine():
+    print("🚀 PRO-MODE: Auto-Trigger High-Probability Scan Started...")
+    now = pd.Timestamp.now(tz='Asia/Kolkata')
     
-    scan_summary = []
+    test_msg = (
+        f"🤖 *⚡ DHAN ALGO: SCANNER ACTIVE ⚡*\n"
+        f"-------------------------------------\n"
+        f"✅ Live Infrastructure Status: ONLINE\n"
+        f"⏰ Scan Time (IST): {now.strftime('%H:%M:%S')}\n"
+        f"-------------------------------------\n"
+        f"🤖 _Monitoring setups for breakout..._"
+    )
+    send_telegram_alert(test_msg)
+
+    # Live market hours check (9:15 AM to 3:30 PM IST)
+    if now.weekday() >= 5 or now.hour < 9 or (now.hour == 9 and now.minute < 15) or (now.hour >= 15 and now.minute > 30):
+        print("💤 Market is currently closed. Exiting safely.")
+        return
 
     for index_name, info in MONITOR_INDICES.items():
         sec_id = info["security_id"]
         exch_seg = info["exchange_segment"]
         lot_size = info["lot_size"]
 
-        # Option Chain Fetch
-        chain_df = get_option_chain_data(sec_id)
-        
-        pcr = 1.0
-        has_chain = False
-        
-        if not chain_df.empty and 'option_type' in chain_df.columns and 'open_interest' in chain_df.columns:
-            has_chain = True
-            total_call_oi = chain_df[chain_df['option_type'] == 'CE']['open_interest'].sum()
-            total_put_oi = chain_df[chain_df['option_type'] == 'PE']['open_interest'].sum()
-            pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
-
-        # OHLC Candles Fetch
         df_5m = get_live_ohlc(sec_id, exch_seg, 5)
         df_15m = get_live_ohlc(sec_id, exch_seg, 15)
 
-        if df_5m.empty or df_15m.empty or len(df_5m) < 3:
-            if has_chain:
-                scan_summary.append(f"📊 *{index_name}*: PCR: {pcr:.2f} | (Chart Syncing...)")
-            else:
-                scan_summary.append(f"⚠️ *{index_name}*: API Response Delay")
+        if df_5m.empty or len(df_5m) < 3 or df_15m.empty:
+            print(f"⚠️ {index_name}: पर्याप्त data candles nahi mili.")
             continue
 
         rsi_5m = RSIIndicator(close=df_5m['close'], window=14).rsi().iloc[-1]
         rsi_15m = RSIIndicator(close=df_15m['close'], window=14).rsi().iloc[-1]
+
         current_ema_50 = EMAIndicator(close=df_5m['close'], window=50).ema_indicator().iloc[-1]
         current_spot = df_5m['close'].iloc[-1]
 
-        scan_summary.append(
-            f"📊 *{index_name}*: Spot ₹{current_spot:.1f} | RSI 5m: {rsi_5m:.1f} | PCR: {pcr:.2f}"
-        )
-
+        pcr, chain_df = fetch_option_chain_data(sec_id)
+        
         signal = None
-        if rsi_5m > 50 and rsi_15m > 50 and current_spot > current_ema_50 and pcr > 1.0:
+        if rsi_5m > 51 and rsi_15m > 50 and current_spot > current_ema_50 and pcr > 1.05:
             signal = "CE"
-        elif rsi_5m < 50 and rsi_15m < 50 and current_spot < current_ema_50 and pcr < 1.0:
+        elif rsi_5m < 49 and rsi_15m < 50 and current_spot < current_ema_50 and pcr < 0.95:
             signal = "PE"
 
-        if signal and has_chain and 'last_traded_price' in chain_df.columns:
+        if signal and chain_df is not None and 'last_traded_price' in chain_df.columns:
             budget_contracts = chain_df[(chain_df['option_type'] == signal) & (chain_df['last_traded_price'] >= 1) & (chain_df['last_traded_price'] <= 200)]
             
             if not budget_contracts.empty:
@@ -162,27 +133,24 @@ def run_trading_scan():
                 strike_price = best_contract.get('strike_price', 'ATM')
                 total_lot_cost = round(live_premium * lot_size, 2)
                 
-                target_premium = round(live_premium * 1.30, 2)
-                sl_premium = round(live_premium * 0.85, 2)
-                
+                target_premium = round(live_premium * 1.25, 2)
+                sl_premium = round(live_premium * 0.90, 2)
+
                 msg = (
-                    f"🎯 *🔥 REAL-TIME DHAN SIGNAL 🔥*\n"
+                    f"🎯 *🔥 ALGO ALERT: {index_name} BREAKOUT 🔥*\n"
                     f"-------------------------------------\n"
-                    f"📈 *Action:* BUY {index_name} {strike_price} {signal}\n"
-                    f"💵 *Live Premium:* ₹{live_premium}\n"
-                    f"📦 *Total Lot Cost:* ₹{total_lot_cost}\n"
+                    f"📈 *Action:* BUY {strike_price} {signal}\n"
+                    f"💵 *Premium:* ₹{live_premium} (Lot Cost: ₹{total_lot_cost})\n"
+                    f"📊 *PCR:* {pcr:.2f} | *RSI 5m:* {rsi_5m:.1f}\n"
                     f"-------------------------------------\n"
-                    f"🎯 *Target (30%):* ₹{target_premium}\n"
-                    f"🛑 *StopLoss (15%):* ₹{sl_premium}\n"
-                    f"-------------------------------------\n"
-                    f"⏱️ RSI 5m: {rsi_5m:.1f} | 15m: {rsi_15m:.1f} | Real PCR: {pcr:.2f}"
+                    f"🚀 *Target (25%):* ₹{target_premium}\n"
+                    f"🛑 *StopLoss (10%):* ₹{sl_premium}\n"
+                    f"📍 *Spot Price:* {current_spot:.1f}"
                 )
                 send_telegram_alert(msg)
+                print(f"✅ Alert triggered successfully for {index_name} {signal}")
 
-    if scan_summary:
-        report = "🔍 *DHAN LIVE SCAN REPORT*\n" + "\n".join(scan_summary)
-        send_telegram_alert(report)
+    print("🔄 Execution successfully completed.")
 
 if __name__ == "__main__":
-    send_telegram_alert("☀️ *DHAN LIVE SCANNING ENGINE ACTIVE*")
-    run_trading_scan()
+    run_trading_engine()
