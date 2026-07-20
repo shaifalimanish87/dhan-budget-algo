@@ -19,10 +19,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 context = DhanContext(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
 dhan = DhanClient(context)
 
+# Official Dhan Index Security IDs
 MONITOR_INDICES = {
-    "NIFTY 50": {"security_id": "13", "lot_size": 75},
-    "BANK NIFTY": {"security_id": "25", "lot_size": 15},
-    "FIN NIFTY": {"security_id": "27", "lot_size": 40}
+    "NIFTY 50": {"security_id": "13", "exchange_segment": "IDX_I", "lot_size": 75},
+    "BANK NIFTY": {"security_id": "25", "exchange_segment": "IDX_I", "lot_size": 15},
+    "FIN NIFTY": {"security_id": "27", "exchange_segment": "IDX_I", "lot_size": 40}
 }
 
 def send_telegram_alert(message):
@@ -33,7 +34,7 @@ def send_telegram_alert(message):
     except Exception as e: 
         print(f"Telegram error: {e}")
 
-def get_live_ohlc(security_id, interval):
+def get_live_ohlc(security_id, exchange_seg, interval):
     try:
         tz_now = pd.Timestamp.now(tz='Asia/Kolkata')
         today_str = tz_now.strftime('%Y-%m-%d')
@@ -41,29 +42,28 @@ def get_live_ohlc(security_id, interval):
         from_datetime = f"{today_str} 09:15:00"
         to_datetime = f"{today_str} 15:30:00"
         
-        # Dhan Official Intraday Minute Chart Endpoint
-        data = dhan.historical_minute_charts(
+        # Dhan HQ Official Intraday Chart Method
+        res = dhan.historical_minute_charts(
             security_id=str(security_id),
-            exchange_segment="IDX_I",  # Index Segment Code in Dhan
+            exchange_segment=exchange_seg,
             instrument_type="INDEX",
             from_date=from_datetime,
             to_date=to_datetime
         )
         
-        # Fallback if IDX_I is strict
-        if not data or data.get('status') != 'success' or 'data' not in data or not data['data']:
-            data = dhan.historical_minute_charts(
-                security_id=str(security_id),
-                exchange_segment="NSE_FNO",
-                instrument_type="INDEX",
-                from_date=from_datetime,
-                to_date=to_datetime
-            )
+        df = pd.DataFrame()
         
-        if data and data.get('status') == 'success' and 'data' in data and data['data']:
-            df = pd.DataFrame(data['data'])
+        # Checking multiple possible response structures from Dhan HQ SDK
+        if isinstance(res, dict) and res.get('status') == 'success':
+            if 'data' in res and res['data']:
+                df = pd.DataFrame(res['data'])
+            elif 'start_time' in res or 'close' in res:
+                df = pd.DataFrame(res)
+        elif isinstance(res, list):
+            df = pd.DataFrame(res)
             
-            # Handling timestamp or datetime columns
+        if not df.empty:
+            # Timestamp Parsing
             if 'start_time' in df.columns:
                 df['start_time'] = pd.to_datetime(df['start_time'], unit='s')
                 df.set_index('start_time', inplace=True)
@@ -101,13 +101,14 @@ def run_trading_scan():
 
     for index_name, info in MONITOR_INDICES.items():
         sec_id = info["security_id"]
+        exch_seg = info["exchange_segment"]
         lot_size = info["lot_size"]
 
-        df_5m = get_live_ohlc(sec_id, 5)
-        df_15m = get_live_ohlc(sec_id, 15)
+        df_5m = get_live_ohlc(sec_id, exch_seg, 5)
+        df_15m = get_live_ohlc(sec_id, exch_seg, 15)
 
         if df_5m.empty or df_15m.empty:
-            scan_summary.append(f"⚠️ *{index_name}*: Data Empty / Dhan API Delay")
+            scan_summary.append(f"⚠️ *{index_name}*: Data Empty / API Issue")
             continue
 
         rsi_5m = RSIIndicator(close=df_5m['close'], window=14).rsi().iloc[-1]
