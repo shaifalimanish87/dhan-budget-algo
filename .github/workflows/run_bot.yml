@@ -2,9 +2,11 @@ name: Run Trading Bot Daily
 
 on:
   schedule:
-    # ⏱️ Monday to Friday (Indian Time: 9:15 AM to 3:30 PM ke beech har 10 minute mein automatic chalega)
-    - cron: '*/10 3-10 * * 1-5'
-  workflow_dispatch: # Manual test button jab chahe tab click karke chalane ke liye
+    # IST 9:15 AM to 3:30 PM (UTC 3:45 AM to 10:00 AM)
+    - cron: '15,25,35,45,55 3 * * 1-5'
+    - cron: '*/10 4-9 * * 1-5'
+    - cron: '0,10,20,30 10 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -26,7 +28,7 @@ jobs:
 
     - name: Run Script
       env:
-        DHAN_CLIENT_ID: "1112617852"
+        DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
         DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
