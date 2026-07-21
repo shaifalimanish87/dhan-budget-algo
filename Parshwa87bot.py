@@ -22,8 +22,8 @@ context = DhanContext(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
 dhan = DhanClient(context)
 
 MONITOR_INDICES = {
-    "NIFTY": {"security_id": "13", "exchange_segment": "IDX_I", "lot_size": 75},
-    "BANKNIFTY": {"security_id": "25", "exchange_segment": "IDX_I", "lot_size": 15}
+    "NIFTY": {"security_id": "13", "exchange_segment": "IDX_I", "lot_size": 65},
+    "BANKNIFTY": {"security_id": "25", "exchange_segment": "IDX_I", "lot_size": 30}
 }
 
 def send_telegram_alert(message):
@@ -113,9 +113,9 @@ def run_trading_engine():
 
         # Standardized responsive conditions
         signal = None
-        if rsi_5m > 50 and rsi_15m > 50 and current_spot > current_ema_50 and pcr >= 1.0:
+        if rsi_5m > 45 and rsi_15m > 45 and current_spot > current_ema_50 and pcr >= 1.0:
             signal = "CE"
-        elif rsi_5m < 50 and rsi_15m < 50 and current_spot < current_ema_50 and pcr <= 1.0:
+        elif rsi_5m < 45 and rsi_15m < 45 and current_spot < current_ema_50 and pcr <= 0.9:
             signal = "PE"
 
         if signal and chain_df is not None and 'last_traded_price' in chain_df.columns:
