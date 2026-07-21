@@ -86,40 +86,36 @@ def run_trading_engine():
         print("💤 Market is currently closed. Exiting safely.")
         return
 
+    diagnostics = []
+
     for index_name, info in MONITOR_INDICES.items():
         sec_id = info["security_id"]
         exch_seg = info["exchange_segment"]
         lot_size = info["lot_size"]
 
         df_5m = get_live_ohlc(sec_id, exch_seg, 5)
-        df_15m = get_live_ohlc(sec_id, exch_seg, 15)
+        pcr, chain_df = fetch_option_chain_data(sec_id)
 
-        # Updated candle check threshold for valid RSI & EMA calculation
-        if df_5m.empty or len(df_5m) < 15 or df_15m.empty:
-            print(f"⚠️ {index_name}: पर्याप्त data candles nahi mili.")
+        if df_5m.empty or len(df_5m) < 5:
+            diagnostics.append(f"⚠️ {index_name}: Chart data loading...")
             continue
 
         rsi_5m = RSIIndicator(close=df_5m['close'], window=min(14, len(df_5m)-1)).rsi().iloc[-1]
-        rsi_15m = RSIIndicator(close=df_15m['close'], window=min(14, len(df_15m)-1)).rsi().iloc[-1]
-
-        # Safety fallback for EMA window
-        ema_window = 50 if len(df_5m) >= 50 else len(df_5m)
-        current_ema_50 = EMAIndicator(close=df_5m['close'], window=ema_window).ema_indicator().iloc[-1]
         current_spot = df_5m['close'].iloc[-1]
 
-        pcr, chain_df = fetch_option_chain_data(sec_id)
-        
-        print(f"📊 {index_name} Diagnostic -> Spot: {current_spot:.1f} | RSI 5m: {rsi_5m:.1f} | PCR: {pcr:.2f}")
+        # Diagnostic log so you always get scan status on Telegram
+        diagnostics.append(f"📊 *{index_name}*: Spot ₹{current_spot:.1f} | RSI 5m: {rsi_5m:.1f} | PCR: {pcr:.2f}")
 
-        # Standardized responsive conditions
+        # EASY & RESPONSIVE CONDITIONS (Quick Alerts)
         signal = None
-        if rsi_5m > 45 and rsi_15m > 45 and current_spot > current_ema_50 and pcr >= 1.0:
+        if rsi_5m > 48 or pcr >= 1.10:
             signal = "CE"
-        elif rsi_5m < 45 and rsi_15m < 45 and current_spot < current_ema_50 and pcr <= 0.9:
+        elif rsi_5m < 52 or pcr <= 0.90:
             signal = "PE"
 
         if signal and chain_df is not None and 'last_traded_price' in chain_df.columns:
-            budget_contracts = chain_df[(chain_df['option_type'] == signal) & (chain_df['last_traded_price'] >= 1) & (chain_df['last_traded_price'] <= 200)]
+            # Expanded budget bracket: ₹1 to ₹300 for active options
+            budget_contracts = chain_df[(chain_df['option_type'] == signal) & (chain_df['last_traded_price'] >= 1) & (chain_df['last_traded_price'] <= 300)]
             
             if not budget_contracts.empty:
                 best_contract = budget_contracts.sort_values(by='last_traded_price', ascending=False).iloc[0]
@@ -131,7 +127,7 @@ def run_trading_engine():
                 sl_premium = round(live_premium * 0.90, 2)
 
                 msg = (
-                    f"🎯 *🔥 ALGO ALERT: {index_name} BREAKOUT 🔥*\n"
+                    f"🎯 *🔥 ALGO ALERT: {index_name} MOMENTUM 🔥*\n"
                     f"-------------------------------------\n"
                     f"📈 *Action:* BUY {strike_price} {signal}\n"
                     f"💵 *Premium:* ₹{live_premium} (Lot Cost: ₹{total_lot_cost})\n"
@@ -143,7 +139,10 @@ def run_trading_engine():
                     f"📍 *Spot Price:* {current_spot:.1f}"
                 )
                 send_telegram_alert(msg)
-                print(f"✅ Alert triggered successfully for {index_name} {signal}")
+
+    # Status summary on Telegram if no specific alert triggered
+    if diagnostics:
+        send_telegram_alert("🔍 *LIVE SCAN REPORT*\n" + "\n".join(diagnostics))
 
     print("🔄 Execution successfully completed.")
 
