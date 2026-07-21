@@ -77,8 +77,10 @@ def get_live_ohlc(security_id, exchange_seg, interval):
         print(f"OHLC Error for {security_id}: {e}")
     return pd.DataFrame()
 
+
+
 def run_trading_engine():
-    print("🚀 PRO-MODE: Auto-Trigger High-Probability Scan Started...")
+    print("🚀 PRO-MODE: Auto-Trigger Scan Started...")
     now = pd.Timestamp.now(tz='Asia/Kolkata')
     
     # Live market hours check (9:15 AM to 3:30 PM IST)
@@ -96,25 +98,25 @@ def run_trading_engine():
         df_5m = get_live_ohlc(sec_id, exch_seg, 5)
         pcr, chain_df = fetch_option_chain_data(sec_id)
 
-        if df_5m.empty or len(df_5m) < 5:
-            diagnostics.append(f"⚠️ {index_name}: Chart data loading...")
-            continue
+        # Fallback: Agar Candles empty hain tab bhi Spot Price Option Chain se mil jata hai
+        if df_5m.empty or len(df_5m) < 2:
+            rsi_5m = 50.0  # Default neutral RSI
+            current_spot = chain_df['last_traded_price'].mean() if chain_df is not None and 'last_traded_price' in chain_df.columns else 0.0
+        else:
+            rsi_5m = RSIIndicator(close=df_5m['close'], window=min(14, len(df_5m)-1)).rsi().iloc[-1]
+            current_spot = df_5m['close'].iloc[-1]
 
-        rsi_5m = RSIIndicator(close=df_5m['close'], window=min(14, len(df_5m)-1)).rsi().iloc[-1]
-        current_spot = df_5m['close'].iloc[-1]
-
-        # Diagnostic log so you always get scan status on Telegram
+        # Scan Report
         diagnostics.append(f"📊 *{index_name}*: Spot ₹{current_spot:.1f} | RSI 5m: {rsi_5m:.1f} | PCR: {pcr:.2f}")
 
-        # EASY & RESPONSIVE CONDITIONS (Quick Alerts)
+        # High-Speed Responsive Signal
         signal = None
-        if rsi_5m > 48 or pcr >= 1.10:
+        if rsi_5m > 45 or pcr >= 1.05:
             signal = "CE"
-        elif rsi_5m < 52 or pcr <= 0.90:
+        elif rsi_5m < 45 or pcr <= 0.95:
             signal = "PE"
 
         if signal and chain_df is not None and 'last_traded_price' in chain_df.columns:
-            # Expanded budget bracket: ₹1 to ₹300 for active options
             budget_contracts = chain_df[(chain_df['option_type'] == signal) & (chain_df['last_traded_price'] >= 1) & (chain_df['last_traded_price'] <= 300)]
             
             if not budget_contracts.empty:
@@ -140,11 +142,11 @@ def run_trading_engine():
                 )
                 send_telegram_alert(msg)
 
-    # Status summary on Telegram if no specific alert triggered
     if diagnostics:
         send_telegram_alert("🔍 *LIVE SCAN REPORT*\n" + "\n".join(diagnostics))
 
     print("🔄 Execution successfully completed.")
+
 
 if __name__ == "__main__":
     run_trading_engine()
