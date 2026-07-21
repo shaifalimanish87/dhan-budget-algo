@@ -31,7 +31,7 @@ def send_telegram_alert(message):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try: 
         r = requests.post(url, json=payload)
-        print(f"Telegram API Response Status: {r.status_code}")
+        print(f"Telegram API Status: {r.status_code}")
     except Exception as e: 
         print(f"Telegram error: {e}")
 
@@ -53,7 +53,6 @@ def get_live_ohlc(security_id, exchange_seg, interval):
         tz_now = pd.Timestamp.now(tz='Asia/Kolkata')
         today_str = tz_now.strftime('%Y-%m-%d')
         
-        # Correct Official Dhan HQ SDK Method
         data = dhan.historical_minute_charts(
             security_id=str(security_id),
             exchange_segment=exchange_seg, 
@@ -68,7 +67,6 @@ def get_live_ohlc(security_id, exchange_seg, interval):
                 df['start_time'] = pd.to_datetime(df['start_time'], unit='s')
                 df.set_index('start_time', inplace=True)
             
-            # Resample 1-min data to 5-min or 15-min interval
             if str(interval) != '1':
                 resampled_df = df.resample(f'{interval}min').agg({
                     'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
@@ -83,16 +81,6 @@ def run_trading_engine():
     print("🚀 PRO-MODE: Auto-Trigger High-Probability Scan Started...")
     now = pd.Timestamp.now(tz='Asia/Kolkata')
     
-    test_msg = (
-        f"🤖 *⚡ DHAN ALGO: SCANNER ACTIVE ⚡*\n"
-        f"-------------------------------------\n"
-        f"✅ Live Infrastructure Status: ONLINE\n"
-        f"⏰ Scan Time (IST): {now.strftime('%H:%M:%S')}\n"
-        f"-------------------------------------\n"
-        f"🤖 _Monitoring setups for breakout..._"
-    )
-    send_telegram_alert(test_msg)
-
     # Live market hours check (9:15 AM to 3:30 PM IST)
     if now.weekday() >= 5 or now.hour < 9 or (now.hour == 9 and now.minute < 15) or (now.hour >= 15 and now.minute > 30):
         print("💤 Market is currently closed. Exiting safely.")
@@ -106,22 +94,28 @@ def run_trading_engine():
         df_5m = get_live_ohlc(sec_id, exch_seg, 5)
         df_15m = get_live_ohlc(sec_id, exch_seg, 15)
 
-        if df_5m.empty or len(df_5m) < 3 or df_15m.empty:
+        # Updated candle check threshold for valid RSI & EMA calculation
+        if df_5m.empty or len(df_5m) < 15 or df_15m.empty:
             print(f"⚠️ {index_name}: पर्याप्त data candles nahi mili.")
             continue
 
-        rsi_5m = RSIIndicator(close=df_5m['close'], window=14).rsi().iloc[-1]
-        rsi_15m = RSIIndicator(close=df_15m['close'], window=14).rsi().iloc[-1]
+        rsi_5m = RSIIndicator(close=df_5m['close'], window=min(14, len(df_5m)-1)).rsi().iloc[-1]
+        rsi_15m = RSIIndicator(close=df_15m['close'], window=min(14, len(df_15m)-1)).rsi().iloc[-1]
 
-        current_ema_50 = EMAIndicator(close=df_5m['close'], window=50).ema_indicator().iloc[-1]
+        # Safety fallback for EMA window
+        ema_window = 50 if len(df_5m) >= 50 else len(df_5m)
+        current_ema_50 = EMAIndicator(close=df_5m['close'], window=ema_window).ema_indicator().iloc[-1]
         current_spot = df_5m['close'].iloc[-1]
 
         pcr, chain_df = fetch_option_chain_data(sec_id)
         
+        print(f"📊 {index_name} Diagnostic -> Spot: {current_spot:.1f} | RSI 5m: {rsi_5m:.1f} | PCR: {pcr:.2f}")
+
+        # Standardized responsive conditions
         signal = None
-        if rsi_5m > 51 and rsi_15m > 50 and current_spot > current_ema_50 and pcr > 1.05:
+        if rsi_5m > 50 and rsi_15m > 50 and current_spot > current_ema_50 and pcr >= 1.0:
             signal = "CE"
-        elif rsi_5m < 49 and rsi_15m < 50 and current_spot < current_ema_50 and pcr < 0.95:
+        elif rsi_5m < 50 and rsi_15m < 50 and current_spot < current_ema_50 and pcr <= 1.0:
             signal = "PE"
 
         if signal and chain_df is not None and 'last_traded_price' in chain_df.columns:
@@ -145,6 +139,7 @@ def run_trading_engine():
                     f"-------------------------------------\n"
                     f"🚀 *Target (25%):* ₹{target_premium}\n"
                     f"🛑 *StopLoss (10%):* ₹{sl_premium}\n"
+                    f"-------------------------------------\n"
                     f"📍 *Spot Price:* {current_spot:.1f}"
                 )
                 send_telegram_alert(msg)
