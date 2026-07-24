@@ -2,10 +2,10 @@ name: Run Trading Bot Daily
 
 on:
   schedule:
-    # IST 9:15 AM to 3:30 PM (UTC 3:45 AM to 10:00 AM)
-    - cron: '15,25,35,45,55 3 * * 1-5'
-    - cron: '*/10 4-9 * * 1-5'
-    - cron: '0,10,20,30 10 * * 1-5'
+    # IST 9:15 AM to 3:30 PM (UTC 3:45 AM to 10:00 AM) - Every 15 mins
+    - cron: '15,30,45 3 * * 1-5'
+    - cron: '*/15 4-9 * * 1-5'
+    - cron: '0,15,30 10 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
     - name: Install Libraries
       run: |
         python -m pip install --upgrade pip
-        pip install dhanhq pandas ta python-dotenv requests yfinance
+        pip install dhanhq pandas yfinance requests
 
     - name: Run Script
       env:
