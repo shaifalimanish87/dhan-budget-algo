@@ -1,8 +1,9 @@
+import os
 import datetime
 import requests
 import yfinance as yf
-from dhanhq import dhanhq
-import os
+from dhanhq import dhanhq as DhanClient
+from dhanhq.dhan_context import DhanContext
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -10,8 +11,12 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
 DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
-# Dhan Client Initialize
-dhan = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+if not DHAN_ACCESS_TOKEN:
+    raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
+
+# Dhan Context & Client Initialize (Fixed for DhanHQ v2+)
+context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+dhan = DhanClient(context)
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -39,7 +44,8 @@ def send_telegram_message(message):
         "parse_mode": "Markdown",
     }
     try:
-        requests.post(url, json=payload)
+        r = requests.post(url, json=payload, timeout=10)
+        print(f"Telegram API Status: {r.status_code}")
     except Exception as e:
         print(f"Telegram Error: {e}")
 
@@ -48,7 +54,7 @@ def get_current_expiry_date():
     """Dhan API se live expiry list me se sabse paas wali expiry auto-fetch karta hai"""
     try:
         exp_data = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
-        if exp_data.get("status") == "success" and exp_data.get("data"):
+        if exp_data and exp_data.get("status") == "success" and exp_data.get("data"):
             expiry_dates = sorted(exp_data["data"])
             today_str = datetime.datetime.now().strftime("%Y-%m-%d")
             valid_expiries = [exp for exp in expiry_dates if exp >= today_str]
@@ -123,7 +129,7 @@ def get_nifty_itm_oi_analysis():
             exchange_segment=dhan.NSE_FNO, security_id="13"
         )
 
-        if quote_data.get("status") != "success":
+        if not quote_data or quote_data.get("status") != "success":
             return None
 
         spot_price = quote_data["data"]["last_price"]
@@ -138,7 +144,7 @@ def get_nifty_itm_oi_analysis():
             expiry=current_expiry,
         )
 
-        if oc_response.get("status") != "success":
+        if not oc_response or oc_response.get("status") != "success":
             return {
                 "spot_price": spot_price,
                 "atm_strike": atm_strike,
@@ -243,6 +249,6 @@ if __name__ == "__main__":
             report = generate_dhan_report()
             send_telegram_message(report)
         else:
-            print(f"[{now.strftime('%I:%M %p')}] Outside Market Hours (09:15 AM - 03:30 PM).")
+            print(f"[{now.strftime('%I:%M %p')}] Outside Market Hours (09:15 AM - 03:30 PM). Exiting.")
     else:
         print("Weekend - Market Closed.")
