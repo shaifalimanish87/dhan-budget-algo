@@ -15,7 +15,7 @@ DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not DHAN_ACCESS_TOKEN:
     raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
 
-# Dhan Context & Client Initialize (Real-Time Dhan Engine)
+# Dhan Context & Client Initialize
 context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
 dhan = DhanClient(context)
 
@@ -51,21 +51,23 @@ def send_telegram_message(message):
         print(f"Telegram Error: {e}")
 
 
-def get_current_expiry_date():
-    """Dhan API se live nearest expiry date auto-fetch karta hai"""
+def get_live_nifty_spot():
+    """Live Nifty Spot Price Fetcher"""
     try:
-        exp_data = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
-        if exp_data and exp_data.get("status") == "success" and exp_data.get("data"):
-            expiry_dates = sorted(exp_data["data"])
-            tz_ist = pytz.timezone('Asia/Kolkata')
-            today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-            valid_expiries = [exp for exp in expiry_dates if exp >= today_str]
-            if valid_expiries:
-                return valid_expiries[0]
+        quote = dhan.get_market_quote(exchange_segment=dhan.NSE_FNO, security_id="13")
+        if quote and quote.get("status") == "success" and "data" in quote:
+            return float(quote["data"]["last_price"])
     except Exception as e:
-        print(f"Expiry Fetch Error: {e}")
-    tz_ist = pytz.timezone('Asia/Kolkata')
-    return datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+        print(f"Dhan Spot Quote Error: {e}")
+
+    try:
+        data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
+        if not data.empty:
+            return float(data["Close"].iloc[-1])
+    except Exception as e:
+        print(f"yfinance Spot Price Error: {e}")
+        
+    return 0.0
 
 
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
@@ -123,47 +125,40 @@ def get_market_news_and_macro_sentiment():
     return sentiment, cues_summary, fii_status
 
 
-# ==================== THEORY 2: REAL-TIME DHAN 3 ITM STRIKES OI LOGIC ====================
+# ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Real-Time Dhan API 3 ITM CE vs PE OI Analysis"""
+    """Theory 2: Real-Time Dhan API Direct 3 ITM CE vs PE OI Analysis"""
     try:
-        # Step 1: Dhan API se Nifty Live Spot Price fetch
-        quote_data = dhan.get_market_quote(
-            exchange_segment=dhan.NSE_FNO, security_id="13"
-        )
-
-        if not quote_data or quote_data.get("status") != "success":
-            # Spot Price Fallback via yfinance if market quote delays
-            spot_data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
-            if spot_data.empty:
-                return None
-            spot_price = float(spot_data["Close"].iloc[-1])
-        else:
-            spot_price = quote_data["data"]["last_price"]
+        spot_price = get_live_nifty_spot()
+        if spot_price == 0.0:
+            print("❌ Spot Price null aa raha hai.")
+            return None
 
         strike_step = 50
         atm_strike = round(spot_price / strike_step) * strike_step
-        current_expiry = get_current_expiry_date()
 
-        # Step 2: Dhan Real-Time Option Chain Request
-        oc_response = dhan.option_chain(
-            under_security_id=13,
-            under_exchange_segment="NSE_INDEX",
-            expiry=current_expiry
-        )
+        # Direct Auto-Expiry Option Chain Call from Dhan
+        oc_response = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO")
 
         if not oc_response or oc_response.get("status") != "success":
+            print(f"❌ Dhan OC Response Raw: {oc_response}")
             return {
                 "spot_price": spot_price,
                 "atm_strike": atm_strike,
                 "ce_total_oi": 0,
                 "pe_total_oi": 0,
                 "difference": 0,
-                "error": "Option chain fetch failed",
+                "error": "Option chain data fetch failed",
             }
 
-        oc_data = oc_response.get("data", [])
+        raw_data = oc_response.get("data", {})
+        
+        # Handle dict or list formats safely
+        if isinstance(raw_data, dict):
+            oc_list = raw_data.get("oc", []) if "oc" in raw_data else [v for k, v in raw_data.items() if isinstance(v, dict)]
+        else:
+            oc_list = raw_data
 
         itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
         itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
@@ -171,15 +166,22 @@ def get_nifty_itm_oi_analysis():
         ce_total_oi = 0
         pe_total_oi = 0
 
-        # Step 3: Calculation of 3 ITM Strikes CE and PE OI
-        for item in oc_data:
-            strike = item.get("strike_price") or item.get("strike")
+        for item in oc_list:
+            # Struct 1: Flat List Format
+            strike = item.get("strike_price") or item.get("strike") or item.get("strikePrice")
+            opt_type = str(item.get("option_type") or item.get("type")).upper()
+            oi = item.get("open_interest") or item.get("oi") or 0
 
-            if strike in itm_ce_strikes and "ce" in item:
-                ce_total_oi += item["ce"].get("oi", 0)
+            if strike in itm_ce_strikes and opt_type == "CE":
+                ce_total_oi += oi
+            elif strike in itm_pe_strikes and opt_type == "PE":
+                pe_total_oi += oi
 
-            if strike in itm_pe_strikes and "pe" in item:
-                pe_total_oi += item["pe"].get("oi", 0)
+            # Struct 2: Nested Dict Format (key per strike)
+            if "ce" in item and strike in itm_ce_strikes:
+                ce_total_oi += item["ce"].get("oi", 0) or item["ce"].get("open_interest", 0)
+            if "pe" in item and strike in itm_pe_strikes:
+                pe_total_oi += item["pe"].get("oi", 0) or item["pe"].get("open_interest", 0)
 
         difference = ce_total_oi - pe_total_oi
 
