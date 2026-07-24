@@ -2,6 +2,7 @@ import os
 import datetime
 import requests
 import pytz
+import time
 import yfinance as yf
 
 # ==================== CONFIGURATION ====================
@@ -13,20 +14,24 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 def format_lakhs(number):
     """Numbers ko Lakhs (Lakh) me format karta hai"""
-    if number is None or number == 0:
+    if number is None:
+        return "Data Unavailable ⚠️"
+    if number == 0:
         return "0.00 Lakh"
     lakh_value = number / 100000
     sign = "+" if lakh_value > 0 else ""
     if lakh_value < 0:
         return f"-{abs(lakh_value):.2f} Lakh"
-    elif lakh_value > 0:
-        return f"{sign}{lakh_value:.2f} Lakh"
     else:
-        return "0.00 Lakh"
+        return f"{sign}{lakh_value:.2f} Lakh"
 
 
 def send_telegram_message(message):
     """Telegram Alert Function"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ Telegram Secrets Missing!")
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -35,19 +40,21 @@ def send_telegram_message(message):
     }
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"Telegram API Status: {r.status_code}")
+        print(f"Telegram API Response Status: {r.status_code}")
     except Exception as e:
-        print(f"Telegram Error: {e}")
+        print(f"Telegram Post Error: {e}")
 
 
 def get_live_nifty_spot():
-    """Live Nifty Spot Price Fetcher"""
+    """Live Nifty Spot Price Fetcher with Logging"""
     try:
         data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
         if not data.empty:
-            return float(data["Close"].iloc[-1])
+            spot = float(data["Close"].iloc[-1])
+            print(f"✅ Nifty Spot Price Fetched: {spot}")
+            return spot
     except Exception as e:
-        print(f"yfinance Spot Price Error: {e}")
+        print(f"❌ yfinance Spot Price Fetch Error: {e}")
     return 0.0
 
 
@@ -58,10 +65,11 @@ def get_market_news_and_macro_sentiment():
     sentiment_score = 0
     cues_summary = []
 
+    # GIFT Nifty Proxy & Major US Indices
     tickers = {
         "S&P 500": "^GSPC",
         "Nasdaq": "^IXIC",
-        "GIFT Nifty": "^NSEI"
+        "GIFT Nifty Proxy": "^NSEI"  # Fallback Index Tracking
     }
 
     for name, ticker in tickers.items():
@@ -79,22 +87,29 @@ def get_market_news_and_macro_sentiment():
                 
                 sign = "+" if p_change > 0 else ""
                 cues_summary.append(f"{name}: `{sign}{p_change:.2f}%`")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ Error fetching {name}: {e}")
 
+    # Robust FII/DII Parsing
+    fii_status = "Data Unavailable ⚠️"
     try:
         url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=5)
-        
-        if "Net Buy" in res.text or "Buy" in res.text:
-            sentiment_score += 1
-            fii_status = "Net Buyers 🟢"
-        else:
-            sentiment_score -= 1
-            fii_status = "Net Sellers 🔴"
-    except Exception:
-        fii_status = "Data Unavailable"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        }
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            content = res.text.lower()
+            if "net buy" in content or "net buyer" in content:
+                sentiment_score += 1
+                fii_status = "Net Buyers 🟢"
+            elif "net sell" in content or "net seller" in content:
+                sentiment_score -= 1
+                fii_status = "Net Sellers 🔴"
+            else:
+                fii_status = "Neutral / Balanced 🟡"
+    except Exception as e:
+        print(f"⚠️ FII/DII Scraping Error: {e}")
 
     if sentiment_score >= 2:
         sentiment = "🟢 **BULLISH (Global Cues & FII Positive)**"
@@ -106,10 +121,55 @@ def get_market_news_and_macro_sentiment():
     return sentiment, cues_summary, fii_status
 
 
-# ==================== THEORY 2: GUARANTEED OPEN INTEREST ENGINE ====================
+# ==================== THEORY 2: ROBUST NSE DIRECT SESSION ENGINE ====================
+
+def fetch_nse_option_chain_with_retry():
+    """NSE Live Option Chain with Retries, Header Spoofing & Session Warmup"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.nseindia.com/option-chain',
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    # Retry loop (Max 3 attempts with delay)
+    for attempt in range(1, 4):
+        try:
+            print(f"🔄 Attempt {attempt}: Warming up NSE Session Cookies...")
+            # Step 1: Visit main site to capture valid cookies
+            home_resp = session.get("https://www.nseindia.com", timeout=6)
+            if home_resp.status_code != 200:
+                print(f"⚠️ NSE Home returned Status: {home_resp.status_code}")
+            
+            time.sleep(1)  # Small delay to mimic human behavior
+
+            # Step 2: Fetch actual Option Chain JSON API
+            api_url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+            api_resp = session.get(api_url, timeout=8)
+            
+            print(f"📊 NSE API Status Code: {api_resp.status_code}")
+
+            if api_resp.status_code == 200:
+                json_data = api_resp.json()
+                if "records" in json_data and "data" in json_data["records"]:
+                    print("✅ Successfully Received NSE Live Option Chain JSON Data!")
+                    return json_data["records"]["data"]
+            elif api_resp.status_code == 403:
+                print("🚫 NSE 403 Forbidden: GitHub US IP Blocked by NSE Cloud Shield.")
+            
+        except Exception as e:
+            print(f"❌ Attempt {attempt} Failed: {e}")
+        
+        time.sleep(2)  # Wait before retrying
+
+    return None
+
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: High-Reliability Yahoo Option API Stream for 3 ITM Strikes"""
+    """Calculates 3 ITM Strikes OI using robust session handling"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -120,36 +180,28 @@ def get_nifty_itm_oi_analysis():
     itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
     itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
 
+    records = fetch_nse_option_chain_with_retry()
+
+    if not records:
+        print("⚠️ Failed to retrieve NSE option chain data after retries.")
+        return {
+            "spot_price": spot_price,
+            "atm_strike": atm_strike,
+            "ce_total_oi": None,
+            "pe_total_oi": None,
+            "difference": None,
+            "failed": True
+        }
+
     ce_total_oi = 0
     pe_total_oi = 0
 
-    # Direct Yahoo Finance Option Chain Stream (No Cloud IP Blocking)
-    try:
-        url = "https://query2.finance.yahoo.com/v7/finance/options/^NSEI"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        }
-        res = requests.get(url, headers=headers, timeout=8)
-        
-        if res.status_code == 200:
-            result = res.json().get('optionChain', {}).get('result', [])
-            if result and len(result) > 0:
-                options = result[0].get('options', [])
-                if options and len(options) > 0:
-                    calls = options[0].get('calls', [])
-                    puts = options[0].get('puts', [])
-
-                    for c in calls:
-                        stk = int(round(float(c.get('strike', 0))))
-                        if stk in itm_ce_strikes:
-                            ce_total_oi += int(c.get('openInterest', 0))
-
-                    for p in puts:
-                        stk = int(round(float(p.get('strike', 0))))
-                        if stk in itm_pe_strikes:
-                            pe_total_oi += int(p.get('openInterest', 0))
-    except Exception as e:
-        print(f"Yahoo Engine Fetch Error: {e}")
+    for r in records:
+        stk = int(round(float(r.get('strikePrice', 0))))
+        if stk in itm_ce_strikes and 'CE' in r:
+            ce_total_oi += int(r['CE'].get('openInterest', 0))
+        if stk in itm_pe_strikes and 'PE' in r:
+            pe_total_oi += int(r['PE'].get('openInterest', 0))
 
     difference = ce_total_oi - pe_total_oi
 
@@ -159,6 +211,7 @@ def get_nifty_itm_oi_analysis():
         "ce_total_oi": ce_total_oi,
         "pe_total_oi": pe_total_oi,
         "difference": difference,
+        "failed": False
     }
 
 
@@ -185,30 +238,36 @@ def generate_dhan_report():
     report += "🎯 **2. TRADE SIGNAL (3 ITM Strikes OI Rule):**\n"
 
     if oi_data:
-        ce_oi = oi_data["ce_total_oi"]
-        pe_oi = oi_data["pe_total_oi"]
-        diff = oi_data["difference"]
+        if oi_data.get("failed", False) or oi_data["ce_total_oi"] is None:
+            trade_signal = "⚠️ **DATA BLOCKED / UNAVAILABLE (NSE Cloud IP Protection)**"
+            ce_lakhs = "Data Unavailable ⚠️"
+            pe_lakhs = "Data Unavailable ⚠️"
+            diff_lakhs = "Data Unavailable ⚠️"
+        else:
+            ce_oi = oi_data["ce_total_oi"]
+            pe_oi = oi_data["pe_total_oi"]
+            diff = oi_data["difference"]
 
-        trade_signal = "🟡 **NO CLEAR SIGNAL (WAIT & WATCH)**"
+            trade_signal = "🟡 **NO CLEAR SIGNAL (WAIT & WATCH)**"
 
-        if pe_oi > 0 and ce_oi >= (pe_oi * 1.25):
-            trade_signal = "🔴 **BUY PE (Call Writers Heavy by 25%+)**"
-        elif ce_oi > 0 and pe_oi >= (ce_oi * 1.25):
-            trade_signal = "🟢 **BUY CE (Put Writers Heavy by 25%+)**"
+            if pe_oi > 0 and ce_oi >= (pe_oi * 1.25):
+                trade_signal = "🔴 **BUY PE (Call Writers Heavy by 25%+)**"
+            elif ce_oi > 0 and pe_oi >= (ce_oi * 1.25):
+                trade_signal = "🟢 **BUY CE (Put Writers Heavy by 25%+)**"
+
+            ce_lakhs = format_lakhs(ce_oi).replace("+", "")
+            pe_lakhs = format_lakhs(pe_oi).replace("+", "")
+            diff_lakhs = format_lakhs(diff)
 
         report += f"• **Signal:** {trade_signal}\n"
         report += f"• **Nifty Spot:** `{oi_data['spot_price']:.1f}` (ATM: `{oi_data['atm_strike']}`)\n\n"
-
-        ce_lakhs = format_lakhs(ce_oi).replace("+", "")
-        pe_lakhs = format_lakhs(pe_oi).replace("+", "")
-        diff_lakhs = format_lakhs(diff)
 
         report += "🔢 **3 ITM Strikes OI Breakup:**\n"
         report += f"• Total CE ITM OI: `{ce_lakhs}`\n"
         report += f"• Total PE ITM OI: `{pe_lakhs}`\n"
         report += f"• Difference (CE - PE): `{diff_lakhs}`\n\n"
     else:
-        report += "⚠️ *Option chain data fetch failed.*\n\n"
+        report += "⚠️ *Market Data Fetch Error.*\n\n"
 
     report += "💡 *Note: Automatic 15-minute interval live update.*"
 
@@ -224,11 +283,11 @@ if __name__ == "__main__":
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
         
         if market_start <= now <= market_end:
-            print(f"[{now.strftime('%I:%M %p IST')}] Executing 15-Min Live Data & Sending Telegram Alert...")
+            print(f"[{now.strftime('%I:%M %p IST')}] Executing 15-Min Live Data...")
             report = generate_dhan_report()
             send_telegram_message(report)
         else:
-            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours. Sending Test Trigger...")
+            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours. Test Trigger...")
             report = generate_dhan_report()
             send_telegram_message(report)
     else:
