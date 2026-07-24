@@ -1,6 +1,7 @@
 import os
 import datetime
 import requests
+import pytz
 import yfinance as yf
 from dhanhq import dhanhq as DhanClient
 from dhanhq.dhan_context import DhanContext
@@ -14,7 +15,7 @@ DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not DHAN_ACCESS_TOKEN:
     raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
 
-# Dhan Context & Client Initialize (Fixed for DhanHQ v2+)
+# Dhan Context & Client Initialize (v2+ Fixed)
 context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
 dhan = DhanClient(context)
 
@@ -51,18 +52,20 @@ def send_telegram_message(message):
 
 
 def get_current_expiry_date():
-    """Dhan API se live expiry list me se sabse paas wali expiry auto-fetch karta hai"""
+    """Dhan API se live expiry list me se nearest expiry fetch karta hai"""
     try:
         exp_data = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
         if exp_data and exp_data.get("status") == "success" and exp_data.get("data"):
             expiry_dates = sorted(exp_data["data"])
-            today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            tz_ist = pytz.timezone('Asia/Kolkata')
+            today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
             valid_expiries = [exp for exp in expiry_dates if exp >= today_str]
             if valid_expiries:
                 return valid_expiries[0]
     except Exception as e:
         print(f"Expiry Fetch Error: {e}")
-    return datetime.datetime.now().strftime("%Y-%m-%d")
+    tz_ist = pytz.timezone('Asia/Kolkata')
+    return datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
 
 
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
@@ -189,7 +192,8 @@ def get_nifty_itm_oi_analysis():
 # ==================== REPORT GENERATOR ====================
 
 def generate_dhan_report():
-    today = datetime.datetime.now().strftime("%d-%b-%Y %I:%M %p")
+    tz_ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.datetime.now(tz_ist).strftime("%d-%b-%Y %I:%M %p")
 
     macro_sentiment, global_cues, fii_status = get_market_news_and_macro_sentiment()
     oi_data = get_nifty_itm_oi_analysis()
@@ -239,16 +243,20 @@ def generate_dhan_report():
 
 
 if __name__ == "__main__":
-    now = datetime.datetime.now()
+    tz_ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.datetime.now(tz_ist)
+    
     if now.weekday() < 5:
         market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
         
         if market_start <= now <= market_end:
-            print(f"[{now.strftime('%I:%M %p')}] Executing 15-Min Live Data & Sending Telegram Alert...")
+            print(f"[{now.strftime('%I:%M %p IST')}] Executing 15-Min Live Data & Sending Telegram Alert...")
             report = generate_dhan_report()
             send_telegram_message(report)
         else:
-            print(f"[{now.strftime('%I:%M %p')}] Outside Market Hours (09:15 AM - 03:30 PM). Exiting.")
+            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours (09:15 AM - 03:30 PM IST). Sending Test Trigger...")
+            report = generate_dhan_report()
+            send_telegram_message(report)
     else:
         print("Weekend - Market Closed.")
