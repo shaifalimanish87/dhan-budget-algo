@@ -3,10 +3,21 @@ import datetime
 import requests
 import pytz
 import yfinance as yf
+from dhanhq import dhanhq as DhanClient
+from dhanhq.dhan_context import DhanContext
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+
+if not DHAN_ACCESS_TOKEN:
+    raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
+
+# Dhan Context & Client Initialize
+context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+dhan = DhanClient(context)
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -43,11 +54,19 @@ def send_telegram_message(message):
 def get_live_nifty_spot():
     """Live Nifty Spot Price Fetcher"""
     try:
+        quote = dhan.get_market_quote(exchange_segment=dhan.NSE_FNO, security_id="13")
+        if quote and quote.get("status") == "success" and "data" in quote:
+            return float(quote["data"]["last_price"])
+    except Exception as e:
+        print(f"Dhan Spot Quote Error: {e}")
+
+    try:
         data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
         if not data.empty:
             return float(data["Close"].iloc[-1])
     except Exception as e:
         print(f"yfinance Spot Price Error: {e}")
+        
     return 0.0
 
 
@@ -109,7 +128,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Direct NSE Session Live 3 ITM CE vs PE OI Analysis"""
+    """Theory 2: Guaranteed 3 ITM CE vs PE OI Stream Engine"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -123,33 +142,47 @@ def get_nifty_itm_oi_analysis():
     ce_total_oi = 0
     pe_total_oi = 0
 
+    # Primary Stream: Real-Time Open Index Endpoint
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br'
-        }
-        
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-        response = session.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            json_data = response.json()
-            data_records = json_data.get('records', {}).get('data', [])
-
-            for record in data_records:
-                strike = int(record.get('strikePrice', 0))
-
-                if strike in itm_ce_strikes and 'CE' in record:
-                    ce_total_oi += int(record['CE'].get('openInterest', 0))
-
-                if strike in itm_pe_strikes and 'PE' in record:
-                    pe_total_oi += int(record['PE'].get('openInterest', 0))
-
+        url = "https://cdn.indiainfoline.com/json/option-chain/NIFTY.json"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            oc_data = res.json().get('data', [])
+            for item in oc_data:
+                stk = int(round(float(item.get('StrikePrice', 0))))
+                if stk in itm_ce_strikes:
+                    ce_total_oi += int(item.get('CE_OI', 0) or item.get('CE_OpenInterest', 0))
+                if stk in itm_pe_strikes:
+                    pe_total_oi += int(item.get('PE_OI', 0) or item.get('PE_OpenInterest', 0))
     except Exception as e:
-        print(f"NSE Option Chain Fetch Error: {e}")
+        print(f"Primary OI Stream Error: {e}")
+
+    # Secondary Fallback Stream: Google/Proxy Data Source
+    if ce_total_oi == 0 and pe_total_oi == 0:
+        try:
+            url = "https://query1.finance.yahoo.com/v7/finance/options/^NSEI"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                result = res.json().get('optionChain', {}).get('result', [])
+                if result:
+                    options = result[0].get('options', [])
+                    if options:
+                        calls = options[0].get('calls', [])
+                        puts = options[0].get('puts', [])
+
+                        for c in calls:
+                            stk = int(round(float(c.get('strike', 0))))
+                            if stk in itm_ce_strikes:
+                                ce_total_oi += int(c.get('openInterest', 0))
+
+                        for p in puts:
+                            stk = int(round(float(p.get('strike', 0))))
+                            if stk in itm_pe_strikes:
+                                pe_total_oi += int(p.get('openInterest', 0))
+        except Exception as e:
+            print(f"Secondary Stream Error: {e}")
 
     difference = ce_total_oi - pe_total_oi
 
