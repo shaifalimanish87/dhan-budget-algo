@@ -3,21 +3,10 @@ import datetime
 import requests
 import pytz
 import yfinance as yf
-from dhanhq import dhanhq as DhanClient
-from dhanhq.dhan_context import DhanContext
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
-DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-
-if not DHAN_ACCESS_TOKEN:
-    raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
-
-# Dhan Context & Client Initialize
-context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-dhan = DhanClient(context)
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -54,19 +43,11 @@ def send_telegram_message(message):
 def get_live_nifty_spot():
     """Live Nifty Spot Price Fetcher"""
     try:
-        quote = dhan.get_market_quote(exchange_segment=dhan.NSE_FNO, security_id="13")
-        if quote and quote.get("status") == "success" and "data" in quote:
-            return float(quote["data"]["last_price"])
-    except Exception as e:
-        print(f"Dhan Spot Quote Error: {e}")
-
-    try:
         data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
         if not data.empty:
             return float(data["Close"].iloc[-1])
     except Exception as e:
         print(f"yfinance Spot Price Error: {e}")
-        
     return 0.0
 
 
@@ -128,7 +109,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Direct Dhan HQ Real-time ITM OI Extractor"""
+    """Theory 2: Direct Reliable 3 ITM CE vs PE Open Interest Stream Engine"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -142,87 +123,42 @@ def get_nifty_itm_oi_analysis():
     ce_total_oi = 0
     pe_total_oi = 0
 
-    # Direct Dhan Option Stream
+    # Stream 1: Direct NSE Cloud Proxy Engine
     try:
-        # Expiry fetch
-        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
-        expiry_date = None
-        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
-            exp_list = exp_res["data"]
-            tz_ist = pytz.timezone('Asia/Kolkata')
-            today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-            valid_expiries = sorted([str(e) for e in exp_list if str(e) >= today_str])
-            if valid_expiries:
-                expiry_date = valid_expiries[0]
-
-        if not expiry_date:
-            tz_ist = pytz.timezone('Asia/Kolkata')
-            expiry_date = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-
-        # Dhan Option Chain Call
-        oc_resp = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO", expiry=expiry_date)
-        
-        if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
-            raw_data = oc_resp["data"]
-            
-            # Key Extraction Strategy
-            oc_list = []
-            if isinstance(raw_data, dict):
-                if "oc" in raw_data:
-                    oc_val = raw_data["oc"]
-                    if isinstance(oc_val, dict):
-                        oc_list = list(oc_val.values())
-                    elif isinstance(oc_val, list):
-                        oc_list = oc_val
-                else:
-                    oc_list = list(raw_data.values())
-            elif isinstance(raw_data, list):
-                oc_list = raw_data
-
-            for item in oc_list:
-                if not isinstance(item, dict):
-                    continue
-
-                # Strike price parsing
-                stk_raw = item.get("strike_price") or item.get("strike") or item.get("strikePrice") or 0
-                stk = int(round(float(stk_raw)))
-
-                # Dhan Option Structure (ce & pe nested dicts)
-                ce_info = item.get("ce") or item.get("CE") or {}
-                pe_info = item.get("pe") or item.get("PE") or {}
-
-                if stk in itm_ce_strikes:
-                    ce_oi = ce_info.get("oi") or ce_info.get("open_interest") or item.get("ce_oi") or 0
-                    ce_total_oi += int(ce_oi)
-
-                if stk in itm_pe_strikes:
-                    pe_oi = pe_info.get("oi") or pe_info.get("open_interest") or item.get("pe_oi") or 0
-                    pe_total_oi += int(pe_oi)
-
+        url = "https://options-chain-api.vercel.app/api/nifty"
+        res = requests.get(url, timeout=6)
+        if res.status_code == 200:
+            data = res.json().get("data", [])
+            for row in data:
+                stk = int(round(float(row.get("strikePrice", 0))))
+                if stk in itm_ce_strikes and "CE" in row:
+                    ce_total_oi += int(row["CE"].get("openInterest", 0))
+                if stk in itm_pe_strikes and "PE" in row:
+                    pe_total_oi += int(row["PE"].get("openInterest", 0))
     except Exception as e:
-        print(f"Dhan Option Chain Extraction Error: {e}")
+        print(f"Proxy Stream 1 Error: {e}")
 
-    # Backup Stream (NSE Live Data Engine) if Dhan returns 0
+    # Stream 2: Direct NSE Cookie Bypasser Engine (Fallback)
     if ce_total_oi == 0 and pe_total_oi == 0:
         try:
-            url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
             }
             sess = requests.Session()
             sess.get("https://www.nseindia.com", headers=headers, timeout=5)
+            url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
             res = sess.get(url, headers=headers, timeout=5)
             if res.status_code == 200:
                 rec = res.json().get('records', {}).get('data', [])
                 for r in rec:
-                    stk = int(r.get('strikePrice', 0))
+                    stk = int(round(float(r.get('strikePrice', 0))))
                     if stk in itm_ce_strikes and 'CE' in r:
                         ce_total_oi += int(r['CE'].get('openInterest', 0))
                     if stk in itm_pe_strikes and 'PE' in r:
                         pe_total_oi += int(r['PE'].get('openInterest', 0))
         except Exception as e:
-            print(f"Backup NSE Engine Error: {e}")
+            print(f"Proxy Stream 2 Error: {e}")
 
     difference = ce_total_oi - pe_total_oi
 
