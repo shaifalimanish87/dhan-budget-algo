@@ -128,7 +128,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Guaranteed 3 ITM CE vs PE OI Stream Engine"""
+    """Theory 2: Direct Dhan HQ Real-time ITM OI Extractor"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -142,47 +142,87 @@ def get_nifty_itm_oi_analysis():
     ce_total_oi = 0
     pe_total_oi = 0
 
-    # Primary Stream: Real-Time Open Index Endpoint
+    # Direct Dhan Option Stream
     try:
-        url = "https://cdn.indiainfoline.com/json/option-chain/NIFTY.json"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            oc_data = res.json().get('data', [])
-            for item in oc_data:
-                stk = int(round(float(item.get('StrikePrice', 0))))
-                if stk in itm_ce_strikes:
-                    ce_total_oi += int(item.get('CE_OI', 0) or item.get('CE_OpenInterest', 0))
-                if stk in itm_pe_strikes:
-                    pe_total_oi += int(item.get('PE_OI', 0) or item.get('PE_OpenInterest', 0))
-    except Exception as e:
-        print(f"Primary OI Stream Error: {e}")
+        # Expiry fetch
+        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
+        expiry_date = None
+        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
+            exp_list = exp_res["data"]
+            tz_ist = pytz.timezone('Asia/Kolkata')
+            today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+            valid_expiries = sorted([str(e) for e in exp_list if str(e) >= today_str])
+            if valid_expiries:
+                expiry_date = valid_expiries[0]
 
-    # Secondary Fallback Stream: Google/Proxy Data Source
+        if not expiry_date:
+            tz_ist = pytz.timezone('Asia/Kolkata')
+            expiry_date = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+
+        # Dhan Option Chain Call
+        oc_resp = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO", expiry=expiry_date)
+        
+        if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
+            raw_data = oc_resp["data"]
+            
+            # Key Extraction Strategy
+            oc_list = []
+            if isinstance(raw_data, dict):
+                if "oc" in raw_data:
+                    oc_val = raw_data["oc"]
+                    if isinstance(oc_val, dict):
+                        oc_list = list(oc_val.values())
+                    elif isinstance(oc_val, list):
+                        oc_list = oc_val
+                else:
+                    oc_list = list(raw_data.values())
+            elif isinstance(raw_data, list):
+                oc_list = raw_data
+
+            for item in oc_list:
+                if not isinstance(item, dict):
+                    continue
+
+                # Strike price parsing
+                stk_raw = item.get("strike_price") or item.get("strike") or item.get("strikePrice") or 0
+                stk = int(round(float(stk_raw)))
+
+                # Dhan Option Structure (ce & pe nested dicts)
+                ce_info = item.get("ce") or item.get("CE") or {}
+                pe_info = item.get("pe") or item.get("PE") or {}
+
+                if stk in itm_ce_strikes:
+                    ce_oi = ce_info.get("oi") or ce_info.get("open_interest") or item.get("ce_oi") or 0
+                    ce_total_oi += int(ce_oi)
+
+                if stk in itm_pe_strikes:
+                    pe_oi = pe_info.get("oi") or pe_info.get("open_interest") or item.get("pe_oi") or 0
+                    pe_total_oi += int(pe_oi)
+
+    except Exception as e:
+        print(f"Dhan Option Chain Extraction Error: {e}")
+
+    # Backup Stream (NSE Live Data Engine) if Dhan returns 0
     if ce_total_oi == 0 and pe_total_oi == 0:
         try:
-            url = "https://query1.finance.yahoo.com/v7/finance/options/^NSEI"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(url, headers=headers, timeout=5)
+            url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            sess = requests.Session()
+            sess.get("https://www.nseindia.com", headers=headers, timeout=5)
+            res = sess.get(url, headers=headers, timeout=5)
             if res.status_code == 200:
-                result = res.json().get('optionChain', {}).get('result', [])
-                if result:
-                    options = result[0].get('options', [])
-                    if options:
-                        calls = options[0].get('calls', [])
-                        puts = options[0].get('puts', [])
-
-                        for c in calls:
-                            stk = int(round(float(c.get('strike', 0))))
-                            if stk in itm_ce_strikes:
-                                ce_total_oi += int(c.get('openInterest', 0))
-
-                        for p in puts:
-                            stk = int(round(float(p.get('strike', 0))))
-                            if stk in itm_pe_strikes:
-                                pe_total_oi += int(p.get('openInterest', 0))
+                rec = res.json().get('records', {}).get('data', [])
+                for r in rec:
+                    stk = int(r.get('strikePrice', 0))
+                    if stk in itm_ce_strikes and 'CE' in r:
+                        ce_total_oi += int(r['CE'].get('openInterest', 0))
+                    if stk in itm_pe_strikes and 'PE' in r:
+                        pe_total_oi += int(r['PE'].get('openInterest', 0))
         except Exception as e:
-            print(f"Secondary Stream Error: {e}")
+            print(f"Backup NSE Engine Error: {e}")
 
     difference = ce_total_oi - pe_total_oi
 
