@@ -54,7 +54,7 @@ def send_telegram_message(message):
 def get_live_nifty_spot():
     """Live Nifty Spot Price Fetcher"""
     try:
-        quote = dhan.get_market_quote(exchange_segment=dhan.NSE_FNO, security_id="13")
+        quote = dhan.get_market_quote(exchange_segment=dhan.INDICES, security_id="13")
         if quote and quote.get("status") == "success" and "data" in quote:
             return float(quote["data"]["last_price"])
     except Exception as e:
@@ -71,9 +71,9 @@ def get_live_nifty_spot():
 
 
 def get_nearest_expiry():
-    """Dhan API se live valid nearest expiry string fetch karta hai"""
+    """Dhan API v2 Correct Enums se Expiry Fetcher"""
     try:
-        res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
+        res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment=dhan.INDICES)
         if res and res.get("status") == "success" and "data" in res:
             expiries = res["data"]
             tz_ist = pytz.timezone('Asia/Kolkata')
@@ -144,7 +144,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Direct Dhan HQ API Option Chain OI Extraction"""
+    """Theory 2: Dhan HQ v2 Correct Enums & Security ID Extraction Engine"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -159,21 +159,25 @@ def get_nifty_itm_oi_analysis():
     pe_total_oi = 0
 
     expiry_date = get_nearest_expiry()
-    
     if not expiry_date:
         tz_ist = pytz.timezone('Asia/Kolkata')
         expiry_date = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
 
     try:
+        # Dhan HQ v2 Param Fix: under_security_id & under_exchange_segment (Enum)
         oc_resp = dhan.get_option_chain(
-            security_id=13, 
-            exchange_segment="NSE_FNO", 
+            under_security_id=13, 
+            under_exchange_segment=dhan.INDICES, 
             expiry=expiry_date
         )
 
         if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
             raw_data = oc_resp["data"]
-            oc_map = raw_data.get("oc", {}) if isinstance(raw_data, dict) else {}
+            
+            # OC Unwrapping
+            oc_map = {}
+            if isinstance(raw_data, dict):
+                oc_map = raw_data.get("oc", raw_data)
 
             if isinstance(oc_map, dict):
                 for strike_key, strike_data in oc_map.items():
@@ -185,7 +189,6 @@ def get_nifty_itm_oi_analysis():
                     if not isinstance(strike_data, dict):
                         continue
 
-                    # Dhan API Keys Parsing (Supports openInterest, oi, open_interest)
                     ce_info = strike_data.get("ce") or strike_data.get("CE") or {}
                     pe_info = strike_data.get("pe") or strike_data.get("PE") or {}
 
