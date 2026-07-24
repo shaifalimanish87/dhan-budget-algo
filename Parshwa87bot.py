@@ -128,13 +128,13 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Direct 3 ITM CE vs PE OI Analysis with Resilient Parsing"""
+    """Theory 2: Direct 3 ITM CE vs PE OI Extraction"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
 
     strike_step = 50
-    atm_strike = round(spot_price / strike_step) * strike_step
+    atm_strike = int(round(spot_price / strike_step) * strike_step)
 
     itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
     itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
@@ -165,7 +165,7 @@ def get_nifty_itm_oi_analysis():
                 for item in oc_list:
                     if not isinstance(item, dict):
                         continue
-                    strike = float(item.get("strike_price") or item.get("strike") or 0)
+                    strike = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
                     ce_data = item.get("ce") or {}
                     pe_data = item.get("pe") or {}
 
@@ -176,20 +176,29 @@ def get_nifty_itm_oi_analysis():
     except Exception as e:
         print(f"Dhan Option Chain primary error: {e}")
 
-    # 2. Secondary Fallback via Yahoo Finance Option Stream (If Dhan Returns 0)
+    # 2. Secondary Reliable Fallback via Yahoo Finance Option Stream
     if ce_total_oi == 0 and pe_total_oi == 0:
-        try:
-            nifty = yf.Ticker("^NSEI")
-            expiries = nifty.options
-            if expiries:
-                chain = nifty.option_chain(expiries[0])
-                ce_sub = chain.calls[chain.calls['strike'].isin(itm_ce_strikes)]
-                pe_sub = chain.puts[chain.puts['strike'].isin(itm_pe_strikes)]
+        for symbol in ["^NSEI", "NIFTY.NS"]:
+            try:
+                nifty = yf.Ticker(symbol)
+                expiries = nifty.options
+                if expiries:
+                    chain = nifty.option_chain(expiries[0])
+                    calls = chain.calls.copy()
+                    puts = chain.puts.copy()
+                    calls['strike'] = calls['strike'].round().astype(int)
+                    puts['strike'] = puts['strike'].round().astype(int)
 
-                ce_total_oi = int(ce_sub['openInterest'].sum()) if not ce_sub.empty else 0
-                pe_total_oi = int(pe_sub['openInterest'].sum()) if not pe_sub.empty else 0
-        except Exception as e:
-            print(f"Secondary fallback error: {e}")
+                    ce_sub = calls[calls['strike'].isin(itm_ce_strikes)]
+                    pe_sub = puts[puts['strike'].isin(itm_pe_strikes)]
+
+                    ce_total_oi = int(ce_sub['openInterest'].sum()) if not ce_sub.empty else 0
+                    pe_total_oi = int(pe_sub['openInterest'].sum()) if not pe_sub.empty else 0
+
+                    if ce_total_oi > 0 or pe_total_oi > 0:
+                        break
+            except Exception as e:
+                print(f"Secondary fallback error for {symbol}: {e}")
 
     difference = ce_total_oi - pe_total_oi
 
