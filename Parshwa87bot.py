@@ -70,6 +70,23 @@ def get_live_nifty_spot():
     return 0.0
 
 
+def get_active_expiry():
+    """Fetch Nearest Expiry Date from Dhan API"""
+    try:
+        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
+        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
+            exp_list = exp_res["data"]
+            if isinstance(exp_list, list) and len(exp_list) > 0:
+                tz_ist = pytz.timezone('Asia/Kolkata')
+                today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+                valid_expiries = sorted([str(e) for e in exp_list if str(e) >= today_str])
+                if valid_expiries:
+                    return valid_expiries[0]
+    except Exception as e:
+        print(f"Expiry Fetch Error: {e}")
+    return None
+
+
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
 
 def get_market_news_and_macro_sentiment():
@@ -127,6 +144,25 @@ def get_market_news_and_macro_sentiment():
 
 # ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
 
+def extract_oi_from_dhan_item(item, strike_val, target_strikes):
+    """Helper to safely extract OI from various Dhan dictionary keys"""
+    oi_sum = 0
+    if not isinstance(item, dict):
+        return oi_sum
+
+    # Direct OI key extraction
+    oi_val = item.get("oi") or item.get("open_interest") or item.get("openInterest") or 0
+    stk = item.get("strike_price") or item.get("strike") or item.get("strikePrice") or strike_val
+    try:
+        stk_int = int(round(float(stk)))
+        if stk_int in target_strikes:
+            oi_sum += int(oi_val)
+    except (ValueError, TypeError):
+        pass
+
+    return oi_sum
+
+
 def get_nifty_itm_oi_analysis():
     """Theory 2: Direct Dhan API Key-based 3 ITM CE vs PE OI Analysis"""
     spot_price = get_live_nifty_spot()
@@ -143,66 +179,63 @@ def get_nifty_itm_oi_analysis():
     pe_total_oi = 0
 
     try:
-        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
-        expiry_date = None
-        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
-            exp_list = exp_res["data"]
+        expiry_date = get_active_expiry()
+        if not expiry_date:
             tz_ist = pytz.timezone('Asia/Kolkata')
-            today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-            valid_expiries = sorted([str(e) for e in exp_list if str(e) >= today_str])
-            if valid_expiries:
-                expiry_date = valid_expiries[0]
+            expiry_date = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
 
-        if expiry_date:
-            oc_resp = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO", expiry=expiry_date)
-            if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
-                raw_data = oc_resp["data"]
-                
-                oc_map = {}
-                if isinstance(raw_data, dict):
-                    oc_map = raw_data.get("oc", raw_data)
+        oc_resp = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO", expiry=expiry_date)
+        
+        if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
+            raw_data = oc_resp["data"]
+            
+            oc_data = raw_data.get("oc", raw_data) if isinstance(raw_data, dict) else raw_data
 
-                if isinstance(oc_map, dict):
-                    for key_str, item in oc_map.items():
-                        if not isinstance(item, dict):
-                            continue
-                        
-                        try:
-                            strike_val = int(round(float(key_str)))
-                        except (ValueError, TypeError):
-                            try:
-                                strike_val = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
-                            except (ValueError, TypeError):
-                                continue
+            if isinstance(oc_data, dict):
+                for key_str, item in oc_data.items():
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    try:
+                        strike_val = int(round(float(key_str)))
+                    except (ValueError, TypeError):
+                        strike_val = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
 
-                        ce_info = item.get("ce") or item.get("CE") or {}
-                        pe_info = item.get("pe") or item.get("PE") or {}
+                    # 1. Nested 'ce'/'pe' objects
+                    ce_obj = item.get("ce") or item.get("CE") or {}
+                    pe_obj = item.get("pe") or item.get("PE") or {}
 
-                        if strike_val in itm_ce_strikes:
-                            ce_total_oi += int(ce_info.get("oi") or ce_info.get("open_interest") or item.get("ce_oi") or 0)
-                        if strike_val in itm_pe_strikes:
-                            pe_total_oi += int(pe_info.get("oi") or pe_info.get("open_interest") or item.get("pe_oi") or 0)
+                    ce_total_oi += extract_oi_from_dhan_item(ce_obj, strike_val, itm_ce_strikes)
+                    pe_total_oi += extract_oi_from_dhan_item(pe_obj, strike_val, itm_pe_strikes)
 
-                elif isinstance(oc_map, list):
-                    for item in oc_map:
-                        if not isinstance(item, dict):
-                            continue
-                        try:
-                            strike_val = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
-                        except (ValueError, TypeError):
-                            continue
+                    # 2. Flat 'ce_oi'/'pe_oi' keys
+                    if strike_val in itm_ce_strikes:
+                        ce_total_oi += int(item.get("ce_oi") or item.get("ce_open_interest") or 0)
+                    if strike_val in itm_pe_strikes:
+                        pe_total_oi += int(item.get("pe_oi") or item.get("pe_open_interest") or 0)
 
-                        ce_info = item.get("ce") or item.get("CE") or {}
-                        pe_info = item.get("pe") or item.get("PE") or {}
+            elif isinstance(oc_data, list):
+                for item in oc_data:
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    strike_val = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
+                    
+                    ce_obj = item.get("ce") or item.get("CE") or {}
+                    pe_obj = item.get("pe") or item.get("PE") or {}
 
-                        if strike_val in itm_ce_strikes:
-                            ce_total_oi += int(ce_info.get("oi") or ce_info.get("open_interest") or item.get("ce_oi") or 0)
-                        if strike_val in itm_pe_strikes:
-                            pe_total_oi += int(pe_info.get("oi") or pe_info.get("open_interest") or item.get("pe_oi") or 0)
+                    ce_total_oi += extract_oi_from_dhan_item(ce_obj, strike_val, itm_ce_strikes)
+                    pe_total_oi += extract_oi_from_dhan_item(pe_obj, strike_val, itm_pe_strikes)
+
+                    if strike_val in itm_ce_strikes:
+                        ce_total_oi += int(item.get("ce_oi") or item.get("ce_open_interest") or 0)
+                    if strike_val in itm_pe_strikes:
+                        pe_total_oi += int(item.get("pe_oi") or item.get("pe_open_interest") or 0)
 
     except Exception as e:
         print(f"Dhan Option Chain Extraction Error: {e}")
 
+    print(f"Calculated Raw CE OI: {ce_total_oi}, Raw PE OI: {pe_total_oi}")
     difference = ce_total_oi - pe_total_oi
 
     return {
