@@ -128,7 +128,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Direct 3 ITM CE vs PE OI Extraction"""
+    """Theory 2: Direct Dhan API Key-based 3 ITM CE vs PE OI Analysis"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -142,7 +142,6 @@ def get_nifty_itm_oi_analysis():
     ce_total_oi = 0
     pe_total_oi = 0
 
-    # 1. Primary Attempt via Dhan HQ
     try:
         exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
         expiry_date = None
@@ -157,48 +156,52 @@ def get_nifty_itm_oi_analysis():
         if expiry_date:
             oc_resp = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO", expiry=expiry_date)
             if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
-                raw = oc_resp["data"]
-                oc_list = raw.get("oc", []) if isinstance(raw, dict) else raw
-                if isinstance(oc_list, dict):
-                    oc_list = list(oc_list.values())
+                raw_data = oc_resp["data"]
+                
+                oc_map = {}
+                if isinstance(raw_data, dict):
+                    oc_map = raw_data.get("oc", raw_data)
 
-                for item in oc_list:
-                    if not isinstance(item, dict):
-                        continue
-                    strike = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
-                    ce_data = item.get("ce") or {}
-                    pe_data = item.get("pe") or {}
+                if isinstance(oc_map, dict):
+                    for key_str, item in oc_map.items():
+                        if not isinstance(item, dict):
+                            continue
+                        
+                        try:
+                            strike_val = int(round(float(key_str)))
+                        except (ValueError, TypeError):
+                            try:
+                                strike_val = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
+                            except (ValueError, TypeError):
+                                continue
 
-                    if strike in itm_ce_strikes:
-                        ce_total_oi += int(ce_data.get("oi") or ce_data.get("open_interest") or item.get("ce_oi") or 0)
-                    if strike in itm_pe_strikes:
-                        pe_total_oi += int(pe_data.get("oi") or pe_data.get("open_interest") or item.get("pe_oi") or 0)
+                        ce_info = item.get("ce") or item.get("CE") or {}
+                        pe_info = item.get("pe") or item.get("PE") or {}
+
+                        if strike_val in itm_ce_strikes:
+                            ce_total_oi += int(ce_info.get("oi") or ce_info.get("open_interest") or item.get("ce_oi") or 0)
+                        if strike_val in itm_pe_strikes:
+                            pe_total_oi += int(pe_info.get("oi") or pe_info.get("open_interest") or item.get("pe_oi") or 0)
+
+                elif isinstance(oc_map, list):
+                    for item in oc_map:
+                        if not isinstance(item, dict):
+                            continue
+                        try:
+                            strike_val = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
+                        except (ValueError, TypeError):
+                            continue
+
+                        ce_info = item.get("ce") or item.get("CE") or {}
+                        pe_info = item.get("pe") or item.get("PE") or {}
+
+                        if strike_val in itm_ce_strikes:
+                            ce_total_oi += int(ce_info.get("oi") or ce_info.get("open_interest") or item.get("ce_oi") or 0)
+                        if strike_val in itm_pe_strikes:
+                            pe_total_oi += int(pe_info.get("oi") or pe_info.get("open_interest") or item.get("pe_oi") or 0)
+
     except Exception as e:
-        print(f"Dhan Option Chain primary error: {e}")
-
-    # 2. Secondary Reliable Fallback via Yahoo Finance Option Stream
-    if ce_total_oi == 0 and pe_total_oi == 0:
-        for symbol in ["^NSEI", "NIFTY.NS"]:
-            try:
-                nifty = yf.Ticker(symbol)
-                expiries = nifty.options
-                if expiries:
-                    chain = nifty.option_chain(expiries[0])
-                    calls = chain.calls.copy()
-                    puts = chain.puts.copy()
-                    calls['strike'] = calls['strike'].round().astype(int)
-                    puts['strike'] = puts['strike'].round().astype(int)
-
-                    ce_sub = calls[calls['strike'].isin(itm_ce_strikes)]
-                    pe_sub = puts[puts['strike'].isin(itm_pe_strikes)]
-
-                    ce_total_oi = int(ce_sub['openInterest'].sum()) if not ce_sub.empty else 0
-                    pe_total_oi = int(pe_sub['openInterest'].sum()) if not pe_sub.empty else 0
-
-                    if ce_total_oi > 0 or pe_total_oi > 0:
-                        break
-            except Exception as e:
-                print(f"Secondary fallback error for {symbol}: {e}")
+        print(f"Dhan Option Chain Extraction Error: {e}")
 
     difference = ce_total_oi - pe_total_oi
 
