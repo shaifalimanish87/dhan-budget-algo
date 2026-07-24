@@ -70,6 +70,23 @@ def get_live_nifty_spot():
     return 0.0
 
 
+def get_active_expiry():
+    """Fetch Nearest Expiry Date from Dhan API"""
+    try:
+        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
+        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
+            exp_list = exp_res["data"]
+            if isinstance(exp_list, list) and len(exp_list) > 0:
+                tz_ist = pytz.timezone('Asia/Kolkata')
+                today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+                valid_expiries = sorted([str(e) for e in exp_list if str(e) >= today_str])
+                if valid_expiries:
+                    return valid_expiries[0]
+    except Exception as e:
+        print(f"Expiry Fetch Error: {e}")
+    return None
+
+
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
 
 def get_market_news_and_macro_sentiment():
@@ -128,7 +145,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Dhan API Flexible Option Chain Parser"""
+    """Theory 2: Exact Dhan API 3 ITM CE vs PE OI Extraction"""
     try:
         spot_price = get_live_nifty_spot()
         if spot_price == 0.0:
@@ -137,8 +154,17 @@ def get_nifty_itm_oi_analysis():
         strike_step = 50
         atm_strike = round(spot_price / strike_step) * strike_step
 
-        # Fetch Option Chain
-        oc_response = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO")
+        expiry_date = get_active_expiry()
+        if not expiry_date:
+            tz_ist = pytz.timezone('Asia/Kolkata')
+            expiry_date = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+
+        # Fetch Option Chain with Explicit Expiry
+        oc_response = dhan.get_option_chain(
+            security_id=13, 
+            exchange_segment="NSE_FNO",
+            expiry=expiry_date
+        )
 
         if not oc_response or oc_response.get("status") != "success":
             return {
@@ -150,65 +176,44 @@ def get_nifty_itm_oi_analysis():
                 "error": "Option chain data fetch failed",
             }
 
-        raw = oc_response.get("data", {})
+        raw_data = oc_response.get("data", {})
         
-        itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
-        itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
+        # Dhan OC Map Parsing
+        oc_map = {}
+        if isinstance(raw_data, dict):
+            if "oc" in raw_data and isinstance(raw_data["oc"], dict):
+                oc_map = raw_data["oc"]
+            else:
+                oc_map = raw_data
+
+        itm_ce_strikes = [float(atm_strike), float(atm_strike - strike_step), float(atm_strike - (2 * strike_step))]
+        itm_pe_strikes = [float(atm_strike), float(atm_strike + strike_step), float(atm_strike + (2 * strike_step))]
 
         ce_total_oi = 0
         pe_total_oi = 0
 
-        # Dynamic Parser for All Dhan Response Formats
-        items_to_check = []
-        if isinstance(raw, dict):
-            if "oc" in raw:
-                oc_val = raw["oc"]
-                if isinstance(oc_val, dict):
-                    items_to_check = list(oc_val.values())
-                elif isinstance(oc_val, list):
-                    items_to_check = oc_val
-            else:
-                items_to_check = list(raw.values())
-        elif isinstance(raw, list):
-            items_to_check = raw
-
-        for item in items_to_check:
+        # Traverse strikes in Dhan OC dictionary
+        for strike_key, item in oc_map.items():
             if not isinstance(item, dict):
                 continue
 
-            strike = float(item.get("strike_price") or item.get("strike") or item.get("strikePrice") or 0)
+            try:
+                strike_val = float(strike_key)
+            except ValueError:
+                strike_val = float(item.get("strike_price") or item.get("strike") or 0)
 
-            # Check 1: Direct 'ce'/'pe' objects inside strike
-            ce_obj = item.get("ce") or item.get("CE")
-            pe_obj = item.get("pe") or item.get("PE")
+            # Direct extraction from nested CE/PE structures
+            ce_info = item.get("ce") or item.get("CE") or {}
+            pe_info = item.get("pe") or item.get("PE") or {}
 
-            if ce_obj and isinstance(ce_obj, dict):
-                stk = float(ce_obj.get("strike_price") or strike)
-                if stk in itm_ce_strikes:
-                    ce_total_oi += int(ce_obj.get("oi") or ce_obj.get("open_interest") or 0)
+            if strike_val in itm_ce_strikes and isinstance(ce_info, dict):
+                ce_total_oi += int(ce_info.get("oi") or ce_info.get("open_interest") or 0)
 
-            if pe_obj and isinstance(pe_obj, dict):
-                stk = float(pe_obj.get("strike_price") or strike)
-                if stk in itm_pe_strikes:
-                    pe_total_oi += int(pe_obj.get("oi") or pe_obj.get("open_interest") or 0)
-
-            # Check 2: Direct flat keys
-            if strike in itm_ce_strikes:
-                ce_total_oi += int(item.get("ce_oi") or item.get("ce_open_interest") or 0)
-            if strike in itm_pe_strikes:
-                pe_total_oi += int(item.get("pe_oi") or item.get("pe_open_interest") or 0)
-
-            # Check 3: Single contract per row format
-            opt_type = str(item.get("option_type") or item.get("type", "")).upper()
-            oi_val = int(item.get("open_interest") or item.get("oi") or 0)
-            if strike in itm_ce_strikes and opt_type == "CE":
-                ce_total_oi += oi_val
-            elif strike in itm_pe_strikes and opt_type == "PE":
-                pe_total_oi += oi_val
+            if strike_val in itm_pe_strikes and isinstance(pe_info, dict):
+                pe_total_oi += int(pe_info.get("oi") or pe_info.get("open_interest") or 0)
 
         difference = ce_total_oi - pe_total_oi
 
-        # Fallback check if OI extracted is 0
         if ce_total_oi == 0 and pe_total_oi == 0:
             return {
                 "spot_price": spot_price,
