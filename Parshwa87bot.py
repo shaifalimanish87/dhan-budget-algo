@@ -3,8 +3,6 @@ import datetime
 import requests
 import pytz
 import yfinance as yf
-from dhanhq import dhanhq as DhanClient
-from dhanhq.dhan_context import DhanContext
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -14,10 +12,6 @@ DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
 if not DHAN_ACCESS_TOKEN:
     raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
-
-# Dhan Context & Client Initialize
-context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-dhan = DhanClient(context)
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -54,9 +48,20 @@ def send_telegram_message(message):
 def get_live_nifty_spot():
     """Live Nifty Spot Price Fetcher"""
     try:
-        quote = dhan.get_market_quote(exchange_segment=dhan.INDICES, security_id="13")
-        if quote and quote.get("status") == "success" and "data" in quote:
-            return float(quote["data"]["last_price"])
+        url = "https://api.dhan.co/v2/marketfeed/quote"
+        headers = {
+            "access-token": DHAN_ACCESS_TOKEN,
+            "client-id": DHAN_CLIENT_ID,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "NSE_INDEX": ["13"]
+        }
+        res = requests.post(url, json=payload, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json().get("data", {})
+            if "NSE_INDEX" in data and "13" in data["NSE_INDEX"]:
+                return float(data["NSE_INDEX"]["13"]["last_price"])
     except Exception as e:
         print(f"Dhan Spot Quote Error: {e}")
 
@@ -71,14 +76,24 @@ def get_live_nifty_spot():
 
 
 def get_nearest_expiry():
-    """Dhan API v2 Correct Enums se Expiry Fetcher"""
+    """Dhan REST API se active Expiry Date list fetch karta hai"""
     try:
-        res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment=dhan.INDICES)
-        if res and res.get("status") == "success" and "data" in res:
-            expiries = res["data"]
+        url = "https://api.dhan.co/v2/optionchain/expirylist"
+        headers = {
+            "access-token": DHAN_ACCESS_TOKEN,
+            "client-id": DHAN_CLIENT_ID,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "UnderlyingScrip": 13,
+            "UnderlyingSeg": "NSE_INDEX"
+        }
+        res = requests.post(url, json=payload, headers=headers, timeout=5)
+        if res.status_code == 200:
+            exp_list = res.json().get("data", [])
             tz_ist = pytz.timezone('Asia/Kolkata')
             today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-            valid = sorted([str(e) for e in expiries if str(e) >= today_str])
+            valid = sorted([str(e) for e in exp_list if str(e) >= today_str])
             if valid:
                 return valid[0]
     except Exception as e:
@@ -144,7 +159,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Dhan HQ v2 Correct Enums & Security ID Extraction Engine"""
+    """Theory 2: Direct Dhan REST API Option Chain Engine"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -164,44 +179,48 @@ def get_nifty_itm_oi_analysis():
         expiry_date = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
 
     try:
-        # Dhan HQ v2 Param Fix: under_security_id & under_exchange_segment (Enum)
-        oc_resp = dhan.get_option_chain(
-            under_security_id=13, 
-            under_exchange_segment=dhan.INDICES, 
-            expiry=expiry_date
-        )
+        url = "https://api.dhan.co/v2/optionchain"
+        headers = {
+            "access-token": DHAN_ACCESS_TOKEN,
+            "client-id": DHAN_CLIENT_ID,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "UnderlyingScrip": 13,
+            "UnderlyingSeg": "NSE_INDEX",
+            "Expiry": expiry_date
+        }
 
-        if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
-            raw_data = oc_resp["data"]
-            
-            # OC Unwrapping
-            oc_map = {}
-            if isinstance(raw_data, dict):
-                oc_map = raw_data.get("oc", raw_data)
+        res = requests.post(url, json=payload, headers=headers, timeout=8)
+        
+        if res.status_code == 200:
+            json_res = res.json()
+            raw_data = json_res.get("data", {})
+            oc_map = raw_data.get("oc", {}) if isinstance(raw_data, dict) else {}
 
             if isinstance(oc_map, dict):
-                for strike_key, strike_data in oc_map.items():
+                for strike_str, strike_data in oc_map.items():
                     try:
-                        strike_val = int(round(float(strike_key)))
+                        strike_val = int(round(float(strike_str)))
                     except (ValueError, TypeError):
                         continue
 
                     if not isinstance(strike_data, dict):
                         continue
 
-                    ce_info = strike_data.get("ce") or strike_data.get("CE") or {}
-                    pe_info = strike_data.get("pe") or strike_data.get("PE") or {}
+                    ce_info = strike_data.get("ce", {})
+                    pe_info = strike_data.get("pe", {})
 
                     if strike_val in itm_ce_strikes and isinstance(ce_info, dict):
-                        ce_oi = ce_info.get("openInterest") or ce_info.get("oi") or ce_info.get("open_interest") or 0
+                        ce_oi = ce_info.get("oi", 0)
                         ce_total_oi += int(ce_oi)
 
                     if strike_val in itm_pe_strikes and isinstance(pe_info, dict):
-                        pe_oi = pe_info.get("openInterest") or pe_info.get("oi") or pe_info.get("open_interest") or 0
+                        pe_oi = pe_info.get("oi", 0)
                         pe_total_oi += int(pe_oi)
 
     except Exception as e:
-        print(f"Dhan API Extraction Error: {e}")
+        print(f"Dhan REST API Error: {e}")
 
     difference = ce_total_oi - pe_total_oi
 
