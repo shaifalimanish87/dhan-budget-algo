@@ -3,10 +3,21 @@ import datetime
 import requests
 import pytz
 import yfinance as yf
+from dhanhq import dhanhq as DhanClient
+from dhanhq.dhan_context import DhanContext
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+
+if not DHAN_ACCESS_TOKEN:
+    raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
+
+# Dhan Context & Client Initialize (Real-Time Dhan Engine)
+context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+dhan = DhanClient(context)
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -40,15 +51,21 @@ def send_telegram_message(message):
         print(f"Telegram Error: {e}")
 
 
-def get_live_nifty_spot():
-    """Live Nifty Spot Price via yfinance"""
+def get_current_expiry_date():
+    """Dhan API se live nearest expiry date auto-fetch karta hai"""
     try:
-        data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
-        if not data.empty:
-            return float(data["Close"].iloc[-1])
+        exp_data = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
+        if exp_data and exp_data.get("status") == "success" and exp_data.get("data"):
+            expiry_dates = sorted(exp_data["data"])
+            tz_ist = pytz.timezone('Asia/Kolkata')
+            today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+            valid_expiries = [exp for exp in expiry_dates if exp >= today_str]
+            if valid_expiries:
+                return valid_expiries[0]
     except Exception as e:
-        print(f"Spot price error: {e}")
-    return 0.0
+        print(f"Expiry Fetch Error: {e}")
+    tz_ist = pytz.timezone('Asia/Kolkata')
+    return datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
 
 
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
@@ -106,36 +123,47 @@ def get_market_news_and_macro_sentiment():
     return sentiment, cues_summary, fii_status
 
 
-# ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
+# ==================== THEORY 2: REAL-TIME DHAN 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Direct NSE Nifty 3 ITM CE vs PE OI Analysis"""
+    """Theory 2: Real-Time Dhan API 3 ITM CE vs PE OI Analysis"""
     try:
-        spot_price = get_live_nifty_spot()
-        if spot_price == 0.0:
-            return None
+        # Step 1: Dhan API se Nifty Live Spot Price fetch
+        quote_data = dhan.get_market_quote(
+            exchange_segment=dhan.NSE_FNO, security_id="13"
+        )
+
+        if not quote_data or quote_data.get("status") != "success":
+            # Spot Price Fallback via yfinance if market quote delays
+            spot_data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
+            if spot_data.empty:
+                return None
+            spot_price = float(spot_data["Close"].iloc[-1])
+        else:
+            spot_price = quote_data["data"]["last_price"]
 
         strike_step = 50
         atm_strike = round(spot_price / strike_step) * strike_step
+        current_expiry = get_current_expiry_date()
 
-        # NSE Direct Option Chain Data Stream
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br'
-        }
-        
-        session = requests.Session()
-        # Session cookie warm-up
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-        response = session.get(url, headers=headers, timeout=10)
-        
-        if response.status_code != 200:
-            return None
+        # Step 2: Dhan Real-Time Option Chain Request
+        oc_response = dhan.option_chain(
+            under_security_id=13,
+            under_exchange_segment="NSE_INDEX",
+            expiry=current_expiry
+        )
 
-        json_data = response.json()
-        data_records = json_data.get('records', {}).get('data', [])
+        if not oc_response or oc_response.get("status") != "success":
+            return {
+                "spot_price": spot_price,
+                "atm_strike": atm_strike,
+                "ce_total_oi": 0,
+                "pe_total_oi": 0,
+                "difference": 0,
+                "error": "Option chain fetch failed",
+            }
+
+        oc_data = oc_response.get("data", [])
 
         itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
         itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
@@ -143,14 +171,15 @@ def get_nifty_itm_oi_analysis():
         ce_total_oi = 0
         pe_total_oi = 0
 
-        for record in data_records:
-            strike = record.get('strikePrice')
+        # Step 3: Calculation of 3 ITM Strikes CE and PE OI
+        for item in oc_data:
+            strike = item.get("strike_price") or item.get("strike")
 
-            if strike in itm_ce_strikes and 'CE' in record:
-                ce_total_oi += record['CE'].get('openInterest', 0)
+            if strike in itm_ce_strikes and "ce" in item:
+                ce_total_oi += item["ce"].get("oi", 0)
 
-            if strike in itm_pe_strikes and 'PE' in record:
-                pe_total_oi += record['PE'].get('openInterest', 0)
+            if strike in itm_pe_strikes and "pe" in item:
+                pe_total_oi += item["pe"].get("oi", 0)
 
         difference = ce_total_oi - pe_total_oi
 
