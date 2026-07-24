@@ -3,21 +3,10 @@ import datetime
 import requests
 import pytz
 import yfinance as yf
-from dhanhq import dhanhq as DhanClient
-from dhanhq.dhan_context import DhanContext
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
-DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-
-if not DHAN_ACCESS_TOKEN:
-    raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
-
-# Dhan Context & Client Initialize
-context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-dhan = DhanClient(context)
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -54,37 +43,12 @@ def send_telegram_message(message):
 def get_live_nifty_spot():
     """Live Nifty Spot Price Fetcher"""
     try:
-        quote = dhan.get_market_quote(exchange_segment=dhan.NSE_FNO, security_id="13")
-        if quote and quote.get("status") == "success" and "data" in quote:
-            return float(quote["data"]["last_price"])
-    except Exception as e:
-        print(f"Dhan Spot Quote Error: {e}")
-
-    try:
         data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
         if not data.empty:
             return float(data["Close"].iloc[-1])
     except Exception as e:
         print(f"yfinance Spot Price Error: {e}")
-        
     return 0.0
-
-
-def get_active_expiry():
-    """Fetch Nearest Expiry Date from Dhan API"""
-    try:
-        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
-        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
-            exp_list = exp_res["data"]
-            if isinstance(exp_list, list) and len(exp_list) > 0:
-                tz_ist = pytz.timezone('Asia/Kolkata')
-                today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-                valid_expiries = sorted([str(e) for e in exp_list if str(e) >= today_str])
-                if valid_expiries:
-                    return valid_expiries[0]
-    except Exception as e:
-        print(f"Expiry Fetch Error: {e}")
-    return None
 
 
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
@@ -142,29 +106,10 @@ def get_market_news_and_macro_sentiment():
     return sentiment, cues_summary, fii_status
 
 
-# ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
-
-def extract_oi_from_dhan_item(item, strike_val, target_strikes):
-    """Helper to safely extract OI from various Dhan dictionary keys"""
-    oi_sum = 0
-    if not isinstance(item, dict):
-        return oi_sum
-
-    # Direct OI key extraction
-    oi_val = item.get("oi") or item.get("open_interest") or item.get("openInterest") or 0
-    stk = item.get("strike_price") or item.get("strike") or item.get("strikePrice") or strike_val
-    try:
-        stk_int = int(round(float(stk)))
-        if stk_int in target_strikes:
-            oi_sum += int(oi_val)
-    except (ValueError, TypeError):
-        pass
-
-    return oi_sum
-
+# ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Direct Dhan API Key-based 3 ITM CE vs PE OI Analysis"""
+    """Theory 2: Direct NSE Session Live 3 ITM CE vs PE OI Analysis"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -179,63 +124,33 @@ def get_nifty_itm_oi_analysis():
     pe_total_oi = 0
 
     try:
-        expiry_date = get_active_expiry()
-        if not expiry_date:
-            tz_ist = pytz.timezone('Asia/Kolkata')
-            expiry_date = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-
-        oc_resp = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO", expiry=expiry_date)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br'
+        }
         
-        if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
-            raw_data = oc_resp["data"]
-            
-            oc_data = raw_data.get("oc", raw_data) if isinstance(raw_data, dict) else raw_data
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+        response = session.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            json_data = response.json()
+            data_records = json_data.get('records', {}).get('data', [])
 
-            if isinstance(oc_data, dict):
-                for key_str, item in oc_data.items():
-                    if not isinstance(item, dict):
-                        continue
-                    
-                    try:
-                        strike_val = int(round(float(key_str)))
-                    except (ValueError, TypeError):
-                        strike_val = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
+            for record in data_records:
+                strike = int(record.get('strikePrice', 0))
 
-                    # 1. Nested 'ce'/'pe' objects
-                    ce_obj = item.get("ce") or item.get("CE") or {}
-                    pe_obj = item.get("pe") or item.get("PE") or {}
+                if strike in itm_ce_strikes and 'CE' in record:
+                    ce_total_oi += int(record['CE'].get('openInterest', 0))
 
-                    ce_total_oi += extract_oi_from_dhan_item(ce_obj, strike_val, itm_ce_strikes)
-                    pe_total_oi += extract_oi_from_dhan_item(pe_obj, strike_val, itm_pe_strikes)
-
-                    # 2. Flat 'ce_oi'/'pe_oi' keys
-                    if strike_val in itm_ce_strikes:
-                        ce_total_oi += int(item.get("ce_oi") or item.get("ce_open_interest") or 0)
-                    if strike_val in itm_pe_strikes:
-                        pe_total_oi += int(item.get("pe_oi") or item.get("pe_open_interest") or 0)
-
-            elif isinstance(oc_data, list):
-                for item in oc_data:
-                    if not isinstance(item, dict):
-                        continue
-                    
-                    strike_val = int(round(float(item.get("strike_price") or item.get("strike") or 0)))
-                    
-                    ce_obj = item.get("ce") or item.get("CE") or {}
-                    pe_obj = item.get("pe") or item.get("PE") or {}
-
-                    ce_total_oi += extract_oi_from_dhan_item(ce_obj, strike_val, itm_ce_strikes)
-                    pe_total_oi += extract_oi_from_dhan_item(pe_obj, strike_val, itm_pe_strikes)
-
-                    if strike_val in itm_ce_strikes:
-                        ce_total_oi += int(item.get("ce_oi") or item.get("ce_open_interest") or 0)
-                    if strike_val in itm_pe_strikes:
-                        pe_total_oi += int(item.get("pe_oi") or item.get("pe_open_interest") or 0)
+                if strike in itm_pe_strikes and 'PE' in record:
+                    pe_total_oi += int(record['PE'].get('openInterest', 0))
 
     except Exception as e:
-        print(f"Dhan Option Chain Extraction Error: {e}")
+        print(f"NSE Option Chain Fetch Error: {e}")
 
-    print(f"Calculated Raw CE OI: {ce_total_oi}, Raw PE OI: {pe_total_oi}")
     difference = ce_total_oi - pe_total_oi
 
     return {
