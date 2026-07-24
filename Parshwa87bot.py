@@ -145,7 +145,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Dhan API 3 ITM CE vs PE OI Analysis"""
+    """Theory 2: Dhan API Universal 3 ITM CE vs PE OI Analysis"""
     try:
         spot_price = get_live_nifty_spot()
         if spot_price == 0.0:
@@ -156,7 +156,6 @@ def get_nifty_itm_oi_analysis():
 
         expiry_date = get_active_expiry()
 
-        # Option Chain Fetch with Expiry Validation
         if expiry_date:
             oc_response = dhan.get_option_chain(
                 security_id=13, 
@@ -181,11 +180,16 @@ def get_nifty_itm_oi_analysis():
 
         raw_data = oc_response.get("data", {})
         
+        # Safe extraction for Dhan's 'oc' dictionary or direct array
+        oc_list = []
         if isinstance(raw_data, dict):
-            oc_list = raw_data.get("oc", [])
-            if not oc_list:
+            if "oc" in raw_data and isinstance(raw_data["oc"], dict):
+                oc_list = list(raw_data["oc"].values())
+            elif "oc" in raw_data and isinstance(raw_data["oc"], list):
+                oc_list = raw_data["oc"]
+            else:
                 oc_list = [v for k, v in raw_data.items() if isinstance(v, dict)]
-        else:
+        elif isinstance(raw_data, list):
             oc_list = raw_data
 
         itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
@@ -195,24 +199,42 @@ def get_nifty_itm_oi_analysis():
         pe_total_oi = 0
 
         for item in oc_list:
-            strike = item.get("strike_price") or item.get("strike") or item.get("strikePrice")
-            
-            # CE / PE Check (Flat Structure)
+            if not isinstance(item, dict):
+                continue
+
+            strike = float(item.get("strike_price") or item.get("strike") or item.get("strikePrice") or 0)
+
+            # Check 1: Nested ce / pe keys
+            if "ce" in item and isinstance(item["ce"], dict) and strike in itm_ce_strikes:
+                ce_total_oi += int(item["ce"].get("oi") or item["ce"].get("open_interest") or 0)
+            if "pe" in item and isinstance(item["pe"], dict) and strike in itm_pe_strikes:
+                pe_total_oi += int(item["pe"].get("oi") or item["pe"].get("open_interest") or 0)
+
+            # Check 2: Flat ce_oi / pe_oi keys
+            if strike in itm_ce_strikes:
+                ce_total_oi += int(item.get("ce_oi") or item.get("ce_open_interest") or 0)
+            if strike in itm_pe_strikes:
+                pe_total_oi += int(item.get("pe_oi") or item.get("pe_open_interest") or 0)
+
+            # Check 3: Generic option_type key
             opt_type = str(item.get("option_type") or item.get("type", "")).upper()
-            oi = item.get("open_interest") or item.get("oi") or 0
-
+            oi_val = int(item.get("open_interest") or item.get("oi") or 0)
             if strike in itm_ce_strikes and opt_type == "CE":
-                ce_total_oi += oi
+                ce_total_oi += oi_val
             elif strike in itm_pe_strikes and opt_type == "PE":
-                pe_total_oi += oi
-
-            # CE / PE Check (Nested Dict Structure)
-            if "ce" in item and (item.get("strike_price") in itm_ce_strikes or strike in itm_ce_strikes):
-                ce_total_oi += item["ce"].get("oi", 0) or item["ce"].get("open_interest", 0)
-            if "pe" in item and (item.get("strike_price") in itm_pe_strikes or strike in itm_pe_strikes):
-                pe_total_oi += item["pe"].get("oi", 0) or item["pe"].get("open_interest", 0)
+                pe_total_oi += oi_val
 
         difference = ce_total_oi - pe_total_oi
+
+        if ce_total_oi == 0 and pe_total_oi == 0:
+            return {
+                "spot_price": spot_price,
+                "atm_strike": atm_strike,
+                "ce_total_oi": 0,
+                "pe_total_oi": 0,
+                "difference": 0,
+                "error": "Option chain data fetch failed",
+            }
 
         return {
             "spot_price": spot_price,
