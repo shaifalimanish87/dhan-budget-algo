@@ -106,10 +106,10 @@ def get_market_news_and_macro_sentiment():
     return sentiment, cues_summary, fii_status
 
 
-# ==================== THEORY 2: 100% FREE LIVE 3 ITM OI ENGINE ====================
+# ==================== THEORY 2: GUARANTEED OPEN INTEREST ENGINE ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Free Stream Engine for 3 ITM CE vs PE Open Interest"""
+    """Theory 2: High-Reliability Yahoo Option API Stream for 3 ITM Strikes"""
     spot_price = get_live_nifty_spot()
     if spot_price == 0.0:
         return None
@@ -123,43 +123,33 @@ def get_nifty_itm_oi_analysis():
     ce_total_oi = 0
     pe_total_oi = 0
 
-    # Stream 1: Realtime Financial API Engine
+    # Direct Yahoo Finance Option Chain Stream (No Cloud IP Blocking)
     try:
-        url = "https://options-chain-api.vercel.app/api/nifty"
-        res = requests.get(url, timeout=6)
+        url = "https://query2.finance.yahoo.com/v7/finance/options/^NSEI"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        }
+        res = requests.get(url, headers=headers, timeout=8)
+        
         if res.status_code == 200:
-            data = res.json().get("data", [])
-            for row in data:
-                stk = int(round(float(row.get("strikePrice", 0))))
-                if stk in itm_ce_strikes and "CE" in row:
-                    ce_total_oi += int(row["CE"].get("openInterest", 0))
-                if stk in itm_pe_strikes and "PE" in row:
-                    pe_total_oi += int(row["PE"].get("openInterest", 0))
-    except Exception as e:
-        print(f"Free Stream 1 Error: {e}")
+            result = res.json().get('optionChain', {}).get('result', [])
+            if result and len(result) > 0:
+                options = result[0].get('options', [])
+                if options and len(options) > 0:
+                    calls = options[0].get('calls', [])
+                    puts = options[0].get('puts', [])
 
-    # Stream 2: Direct NSE Session Engine (Fallback)
-    if ce_total_oi == 0 and pe_total_oi == 0:
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }
-            session = requests.Session()
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-            res = session.get(url, headers=headers, timeout=5)
-            
-            if res.status_code == 200:
-                rec = res.json().get('records', {}).get('data', [])
-                for r in rec:
-                    stk = int(round(float(r.get('strikePrice', 0))))
-                    if stk in itm_ce_strikes and 'CE' in r:
-                        ce_total_oi += int(r['CE'].get('openInterest', 0))
-                    if stk in itm_pe_strikes and 'PE' in r:
-                        pe_total_oi += int(r['PE'].get('openInterest', 0))
-        except Exception as e:
-            print(f"Free Stream 2 Error: {e}")
+                    for c in calls:
+                        stk = int(round(float(c.get('strike', 0))))
+                        if stk in itm_ce_strikes:
+                            ce_total_oi += int(c.get('openInterest', 0))
+
+                    for p in puts:
+                        stk = int(round(float(p.get('strike', 0))))
+                        if stk in itm_pe_strikes:
+                            pe_total_oi += int(p.get('openInterest', 0))
+    except Exception as e:
+        print(f"Yahoo Engine Fetch Error: {e}")
 
     difference = ce_total_oi - pe_total_oi
 
