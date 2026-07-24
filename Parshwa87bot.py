@@ -70,23 +70,6 @@ def get_live_nifty_spot():
     return 0.0
 
 
-def get_active_expiry():
-    """Fetch Nearest Expiry Date from Dhan API"""
-    try:
-        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
-        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
-            exp_list = exp_res["data"]
-            if isinstance(exp_list, list) and len(exp_list) > 0:
-                tz_ist = pytz.timezone('Asia/Kolkata')
-                today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-                valid_expiries = sorted([e for e in exp_list if str(e) >= today_str])
-                if valid_expiries:
-                    return valid_expiries[0]
-    except Exception as e:
-        print(f"Expiry Fetch Error: {e}")
-    return None
-
-
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
 
 def get_market_news_and_macro_sentiment():
@@ -145,7 +128,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Dhan API Universal 3 ITM CE vs PE OI Analysis"""
+    """Theory 2: Dhan API Flexible Option Chain Parser"""
     try:
         spot_price = get_live_nifty_spot()
         if spot_price == 0.0:
@@ -154,19 +137,8 @@ def get_nifty_itm_oi_analysis():
         strike_step = 50
         atm_strike = round(spot_price / strike_step) * strike_step
 
-        expiry_date = get_active_expiry()
-
-        if expiry_date:
-            oc_response = dhan.get_option_chain(
-                security_id=13, 
-                exchange_segment="NSE_FNO",
-                expiry=expiry_date
-            )
-        else:
-            oc_response = dhan.get_option_chain(
-                security_id=13, 
-                exchange_segment="NSE_FNO"
-            )
+        # Fetch Option Chain
+        oc_response = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO")
 
         if not oc_response or oc_response.get("status") != "success":
             return {
@@ -178,45 +150,55 @@ def get_nifty_itm_oi_analysis():
                 "error": "Option chain data fetch failed",
             }
 
-        raw_data = oc_response.get("data", {})
+        raw = oc_response.get("data", {})
         
-        # Safe extraction for Dhan's 'oc' dictionary or direct array
-        oc_list = []
-        if isinstance(raw_data, dict):
-            if "oc" in raw_data and isinstance(raw_data["oc"], dict):
-                oc_list = list(raw_data["oc"].values())
-            elif "oc" in raw_data and isinstance(raw_data["oc"], list):
-                oc_list = raw_data["oc"]
-            else:
-                oc_list = [v for k, v in raw_data.items() if isinstance(v, dict)]
-        elif isinstance(raw_data, list):
-            oc_list = raw_data
-
         itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
         itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
 
         ce_total_oi = 0
         pe_total_oi = 0
 
-        for item in oc_list:
+        # Dynamic Parser for All Dhan Response Formats
+        items_to_check = []
+        if isinstance(raw, dict):
+            if "oc" in raw:
+                oc_val = raw["oc"]
+                if isinstance(oc_val, dict):
+                    items_to_check = list(oc_val.values())
+                elif isinstance(oc_val, list):
+                    items_to_check = oc_val
+            else:
+                items_to_check = list(raw.values())
+        elif isinstance(raw, list):
+            items_to_check = raw
+
+        for item in items_to_check:
             if not isinstance(item, dict):
                 continue
 
             strike = float(item.get("strike_price") or item.get("strike") or item.get("strikePrice") or 0)
 
-            # Check 1: Nested ce / pe keys
-            if "ce" in item and isinstance(item["ce"], dict) and strike in itm_ce_strikes:
-                ce_total_oi += int(item["ce"].get("oi") or item["ce"].get("open_interest") or 0)
-            if "pe" in item and isinstance(item["pe"], dict) and strike in itm_pe_strikes:
-                pe_total_oi += int(item["pe"].get("oi") or item["pe"].get("open_interest") or 0)
+            # Check 1: Direct 'ce'/'pe' objects inside strike
+            ce_obj = item.get("ce") or item.get("CE")
+            pe_obj = item.get("pe") or item.get("PE")
 
-            # Check 2: Flat ce_oi / pe_oi keys
+            if ce_obj and isinstance(ce_obj, dict):
+                stk = float(ce_obj.get("strike_price") or strike)
+                if stk in itm_ce_strikes:
+                    ce_total_oi += int(ce_obj.get("oi") or ce_obj.get("open_interest") or 0)
+
+            if pe_obj and isinstance(pe_obj, dict):
+                stk = float(pe_obj.get("strike_price") or strike)
+                if stk in itm_pe_strikes:
+                    pe_total_oi += int(pe_obj.get("oi") or pe_obj.get("open_interest") or 0)
+
+            # Check 2: Direct flat keys
             if strike in itm_ce_strikes:
                 ce_total_oi += int(item.get("ce_oi") or item.get("ce_open_interest") or 0)
             if strike in itm_pe_strikes:
                 pe_total_oi += int(item.get("pe_oi") or item.get("pe_open_interest") or 0)
 
-            # Check 3: Generic option_type key
+            # Check 3: Single contract per row format
             opt_type = str(item.get("option_type") or item.get("type", "")).upper()
             oi_val = int(item.get("open_interest") or item.get("oi") or 0)
             if strike in itm_ce_strikes and opt_type == "CE":
@@ -226,6 +208,7 @@ def get_nifty_itm_oi_analysis():
 
         difference = ce_total_oi - pe_total_oi
 
+        # Fallback check if OI extracted is 0
         if ce_total_oi == 0 and pe_total_oi == 0:
             return {
                 "spot_price": spot_price,
