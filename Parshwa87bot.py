@@ -3,21 +3,10 @@ import datetime
 import requests
 import pytz
 import yfinance as yf
-from dhanhq import dhanhq as DhanClient
-from dhanhq.dhan_context import DhanContext
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
-DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-
-if not DHAN_ACCESS_TOKEN:
-    raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
-
-# Dhan Context & Client Initialize
-context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-dhan = DhanClient(context)
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -52,7 +41,7 @@ def send_telegram_message(message):
 
 
 def get_live_nifty_spot():
-    """Live Nifty Spot Price via yfinance (100% Reliable)"""
+    """Live Nifty Spot Price via yfinance"""
     try:
         data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
         if not data.empty:
@@ -120,7 +109,7 @@ def get_market_news_and_macro_sentiment():
 # ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Live 3 ITM CE vs PE OI Analysis"""
+    """Theory 2: Direct NSE Nifty 3 ITM CE vs PE OI Analysis"""
     try:
         spot_price = get_live_nifty_spot()
         if spot_price == 0.0:
@@ -129,29 +118,24 @@ def get_nifty_itm_oi_analysis():
         strike_step = 50
         atm_strike = round(spot_price / strike_step) * strike_step
 
-        # Fetch Option Chain using DhanHQ API
-        oc_response = dhan.get_option_chain(
-            security_id=13,
-            exchange_segment="NSE_FNO"
-        )
-
-        if not oc_response or oc_response.get("status") != "success" or 'data' not in oc_response:
-            return {
-                "spot_price": spot_price,
-                "atm_strike": atm_strike,
-                "ce_total_oi": 0,
-                "pe_total_oi": 0,
-                "difference": 0,
-                "error": "Option chain data fetch failed",
-            }
-
-        raw_data = oc_response.get("data", [])
+        # NSE Direct Option Chain Data Stream
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br'
+        }
         
-        # Handle list or nested dict format safely
-        if isinstance(raw_data, dict):
-            oc_list = raw_data.get("oc", [])
-        else:
-            oc_list = raw_data
+        session = requests.Session()
+        # Session cookie warm-up
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+        response = session.get(url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            return None
+
+        json_data = response.json()
+        data_records = json_data.get('records', {}).get('data', [])
 
         itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
         itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
@@ -159,16 +143,14 @@ def get_nifty_itm_oi_analysis():
         ce_total_oi = 0
         pe_total_oi = 0
 
-        for item in oc_list:
-            strike = item.get("strike_price") or item.get("strike")
-            opt_type = item.get("option_type") or item.get("type")
-            oi = item.get("open_interest") or item.get("oi") or 0
+        for record in data_records:
+            strike = record.get('strikePrice')
 
-            if strike in itm_ce_strikes and opt_type == "CE":
-                ce_total_oi += oi
+            if strike in itm_ce_strikes and 'CE' in record:
+                ce_total_oi += record['CE'].get('openInterest', 0)
 
-            if strike in itm_pe_strikes and opt_type == "PE":
-                pe_total_oi += oi
+            if strike in itm_pe_strikes and 'PE' in record:
+                pe_total_oi += record['PE'].get('openInterest', 0)
 
         difference = ce_total_oi - pe_total_oi
 
