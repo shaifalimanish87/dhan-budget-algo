@@ -15,7 +15,7 @@ DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 if not DHAN_ACCESS_TOKEN:
     raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
 
-# Dhan Context & Client Initialize (v2+ Fixed)
+# Dhan Context & Client Initialize
 context = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
 dhan = DhanClient(context)
 
@@ -24,7 +24,7 @@ dhan = DhanClient(context)
 
 def format_lakhs(number):
     """Numbers ko Lakhs (Lakh) me format karta hai"""
-    if number is None:
+    if number is None or number == 0:
         return "0.00 Lakh"
     lakh_value = number / 100000
     sign = "+" if lakh_value > 0 else ""
@@ -51,21 +51,15 @@ def send_telegram_message(message):
         print(f"Telegram Error: {e}")
 
 
-def get_current_expiry_date():
-    """Dhan API se live expiry list me se nearest expiry fetch karta hai"""
+def get_live_nifty_spot():
+    """Live Nifty Spot Price via yfinance (100% Reliable)"""
     try:
-        exp_data = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
-        if exp_data and exp_data.get("status") == "success" and exp_data.get("data"):
-            expiry_dates = sorted(exp_data["data"])
-            tz_ist = pytz.timezone('Asia/Kolkata')
-            today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-            valid_expiries = [exp for exp in expiry_dates if exp >= today_str]
-            if valid_expiries:
-                return valid_expiries[0]
+        data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
+        if not data.empty:
+            return float(data["Close"].iloc[-1])
     except Exception as e:
-        print(f"Expiry Fetch Error: {e}")
-    tz_ist = pytz.timezone('Asia/Kolkata')
-    return datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+        print(f"Spot price error: {e}")
+    return 0.0
 
 
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
@@ -128,36 +122,36 @@ def get_market_news_and_macro_sentiment():
 def get_nifty_itm_oi_analysis():
     """Theory 2: Live 3 ITM CE vs PE OI Analysis"""
     try:
-        quote_data = dhan.get_market_quote(
-            exchange_segment=dhan.NSE_FNO, security_id="13"
-        )
-
-        if not quote_data or quote_data.get("status") != "success":
+        spot_price = get_live_nifty_spot()
+        if spot_price == 0.0:
             return None
 
-        spot_price = quote_data["data"]["last_price"]
         strike_step = 50
         atm_strike = round(spot_price / strike_step) * strike_step
 
-        current_expiry = get_current_expiry_date()
-
-        oc_response = dhan.option_chain(
-            under_security_id=13,
-            under_exchange_segment="NSE_INDEX",
-            expiry=current_expiry,
+        # Fetch Option Chain using DhanHQ API
+        oc_response = dhan.get_option_chain(
+            security_id=13,
+            exchange_segment="NSE_FNO"
         )
 
-        if not oc_response or oc_response.get("status") != "success":
+        if not oc_response or oc_response.get("status") != "success" or 'data' not in oc_response:
             return {
                 "spot_price": spot_price,
                 "atm_strike": atm_strike,
                 "ce_total_oi": 0,
                 "pe_total_oi": 0,
                 "difference": 0,
-                "error": "Option chain fetch failed",
+                "error": "Option chain data fetch failed",
             }
 
-        oc_data = oc_response.get("data", {})
+        raw_data = oc_response.get("data", [])
+        
+        # Handle list or nested dict format safely
+        if isinstance(raw_data, dict):
+            oc_list = raw_data.get("oc", [])
+        else:
+            oc_list = raw_data
 
         itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
         itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
@@ -165,14 +159,16 @@ def get_nifty_itm_oi_analysis():
         ce_total_oi = 0
         pe_total_oi = 0
 
-        for item in oc_data:
-            strike = item.get("strike_price")
+        for item in oc_list:
+            strike = item.get("strike_price") or item.get("strike")
+            opt_type = item.get("option_type") or item.get("type")
+            oi = item.get("open_interest") or item.get("oi") or 0
 
-            if strike in itm_ce_strikes and "ce" in item:
-                ce_total_oi += item["ce"].get("oi", 0)
+            if strike in itm_ce_strikes and opt_type == "CE":
+                ce_total_oi += oi
 
-            if strike in itm_pe_strikes and "pe" in item:
-                pe_total_oi += item["pe"].get("oi", 0)
+            if strike in itm_pe_strikes and opt_type == "PE":
+                pe_total_oi += oi
 
         difference = ce_total_oi - pe_total_oi
 
@@ -224,7 +220,7 @@ def generate_dhan_report():
             trade_signal = "🟢 **BUY CE (Put Writers Heavy by 25%+)**"
 
         report += f"• **Signal:** {trade_signal}\n"
-        report += f"• **Nifty Spot:** `{oi_data['spot_price']}` (ATM: `{oi_data['atm_strike']}`)\n\n"
+        report += f"• **Nifty Spot:** `{oi_data['spot_price']:.1f}` (ATM: `{oi_data['atm_strike']}`)\n\n"
 
         ce_lakhs = format_lakhs(ce_oi).replace("+", "")
         pe_lakhs = format_lakhs(pe_oi).replace("+", "")
@@ -255,7 +251,7 @@ if __name__ == "__main__":
             report = generate_dhan_report()
             send_telegram_message(report)
         else:
-            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours (09:15 AM - 03:30 PM IST). Sending Test Trigger...")
+            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours. Sending Test Trigger...")
             report = generate_dhan_report()
             send_telegram_message(report)
     else:
