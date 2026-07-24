@@ -70,23 +70,6 @@ def get_live_nifty_spot():
     return 0.0
 
 
-def get_active_expiry():
-    """Fetch Nearest Expiry Date from Dhan API"""
-    try:
-        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
-        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
-            exp_list = exp_res["data"]
-            if isinstance(exp_list, list) and len(exp_list) > 0:
-                tz_ist = pytz.timezone('Asia/Kolkata')
-                today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-                valid_expiries = sorted([str(e) for e in exp_list if str(e) >= today_str])
-                if valid_expiries:
-                    return valid_expiries[0]
-    except Exception as e:
-        print(f"Expiry Fetch Error: {e}")
-    return None
-
-
 # ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
 
 def get_market_news_and_macro_sentiment():
@@ -142,99 +125,81 @@ def get_market_news_and_macro_sentiment():
     return sentiment, cues_summary, fii_status
 
 
-# ==================== THEORY 2: REAL-TIME 3 ITM STRIKES OI LOGIC ====================
+# ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
 
 def get_nifty_itm_oi_analysis():
-    """Theory 2: Exact Dhan API 3 ITM CE vs PE OI Extraction"""
-    try:
-        spot_price = get_live_nifty_spot()
-        if spot_price == 0.0:
-            return None
-
-        strike_step = 50
-        atm_strike = round(spot_price / strike_step) * strike_step
-
-        expiry_date = get_active_expiry()
-        if not expiry_date:
-            tz_ist = pytz.timezone('Asia/Kolkata')
-            expiry_date = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
-
-        # Fetch Option Chain with Explicit Expiry
-        oc_response = dhan.get_option_chain(
-            security_id=13, 
-            exchange_segment="NSE_FNO",
-            expiry=expiry_date
-        )
-
-        if not oc_response or oc_response.get("status") != "success":
-            return {
-                "spot_price": spot_price,
-                "atm_strike": atm_strike,
-                "ce_total_oi": 0,
-                "pe_total_oi": 0,
-                "difference": 0,
-                "error": "Option chain data fetch failed",
-            }
-
-        raw_data = oc_response.get("data", {})
-        
-        # Dhan OC Map Parsing
-        oc_map = {}
-        if isinstance(raw_data, dict):
-            if "oc" in raw_data and isinstance(raw_data["oc"], dict):
-                oc_map = raw_data["oc"]
-            else:
-                oc_map = raw_data
-
-        itm_ce_strikes = [float(atm_strike), float(atm_strike - strike_step), float(atm_strike - (2 * strike_step))]
-        itm_pe_strikes = [float(atm_strike), float(atm_strike + strike_step), float(atm_strike + (2 * strike_step))]
-
-        ce_total_oi = 0
-        pe_total_oi = 0
-
-        # Traverse strikes in Dhan OC dictionary
-        for strike_key, item in oc_map.items():
-            if not isinstance(item, dict):
-                continue
-
-            try:
-                strike_val = float(strike_key)
-            except ValueError:
-                strike_val = float(item.get("strike_price") or item.get("strike") or 0)
-
-            # Direct extraction from nested CE/PE structures
-            ce_info = item.get("ce") or item.get("CE") or {}
-            pe_info = item.get("pe") or item.get("PE") or {}
-
-            if strike_val in itm_ce_strikes and isinstance(ce_info, dict):
-                ce_total_oi += int(ce_info.get("oi") or ce_info.get("open_interest") or 0)
-
-            if strike_val in itm_pe_strikes and isinstance(pe_info, dict):
-                pe_total_oi += int(pe_info.get("oi") or pe_info.get("open_interest") or 0)
-
-        difference = ce_total_oi - pe_total_oi
-
-        if ce_total_oi == 0 and pe_total_oi == 0:
-            return {
-                "spot_price": spot_price,
-                "atm_strike": atm_strike,
-                "ce_total_oi": 0,
-                "pe_total_oi": 0,
-                "difference": 0,
-                "error": "Option chain data fetch failed",
-            }
-
-        return {
-            "spot_price": spot_price,
-            "atm_strike": atm_strike,
-            "ce_total_oi": ce_total_oi,
-            "pe_total_oi": pe_total_oi,
-            "difference": difference,
-        }
-
-    except Exception as e:
-        print(f"Error calculating ITM OI: {e}")
+    """Theory 2: Direct 3 ITM CE vs PE OI Analysis with Resilient Parsing"""
+    spot_price = get_live_nifty_spot()
+    if spot_price == 0.0:
         return None
+
+    strike_step = 50
+    atm_strike = round(spot_price / strike_step) * strike_step
+
+    itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
+    itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
+
+    ce_total_oi = 0
+    pe_total_oi = 0
+
+    # 1. Primary Attempt via Dhan HQ
+    try:
+        exp_res = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
+        expiry_date = None
+        if exp_res and exp_res.get("status") == "success" and "data" in exp_res:
+            exp_list = exp_res["data"]
+            tz_ist = pytz.timezone('Asia/Kolkata')
+            today_str = datetime.datetime.now(tz_ist).strftime("%Y-%m-%d")
+            valid_expiries = sorted([str(e) for e in exp_list if str(e) >= today_str])
+            if valid_expiries:
+                expiry_date = valid_expiries[0]
+
+        if expiry_date:
+            oc_resp = dhan.get_option_chain(security_id=13, exchange_segment="NSE_FNO", expiry=expiry_date)
+            if oc_resp and oc_resp.get("status") == "success" and "data" in oc_resp:
+                raw = oc_resp["data"]
+                oc_list = raw.get("oc", []) if isinstance(raw, dict) else raw
+                if isinstance(oc_list, dict):
+                    oc_list = list(oc_list.values())
+
+                for item in oc_list:
+                    if not isinstance(item, dict):
+                        continue
+                    strike = float(item.get("strike_price") or item.get("strike") or 0)
+                    ce_data = item.get("ce") or {}
+                    pe_data = item.get("pe") or {}
+
+                    if strike in itm_ce_strikes:
+                        ce_total_oi += int(ce_data.get("oi") or ce_data.get("open_interest") or item.get("ce_oi") or 0)
+                    if strike in itm_pe_strikes:
+                        pe_total_oi += int(pe_data.get("oi") or pe_data.get("open_interest") or item.get("pe_oi") or 0)
+    except Exception as e:
+        print(f"Dhan Option Chain primary error: {e}")
+
+    # 2. Secondary Fallback via Yahoo Finance Option Stream (If Dhan Returns 0)
+    if ce_total_oi == 0 and pe_total_oi == 0:
+        try:
+            nifty = yf.Ticker("^NSEI")
+            expiries = nifty.options
+            if expiries:
+                chain = nifty.option_chain(expiries[0])
+                ce_sub = chain.calls[chain.calls['strike'].isin(itm_ce_strikes)]
+                pe_sub = chain.puts[chain.puts['strike'].isin(itm_pe_strikes)]
+
+                ce_total_oi = int(ce_sub['openInterest'].sum()) if not ce_sub.empty else 0
+                pe_total_oi = int(pe_sub['openInterest'].sum()) if not pe_sub.empty else 0
+        except Exception as e:
+            print(f"Secondary fallback error: {e}")
+
+    difference = ce_total_oi - pe_total_oi
+
+    return {
+        "spot_price": spot_price,
+        "atm_strike": atm_strike,
+        "ce_total_oi": ce_total_oi,
+        "pe_total_oi": pe_total_oi,
+        "difference": difference,
+    }
 
 
 # ==================== REPORT GENERATOR ====================
@@ -259,7 +224,7 @@ def generate_dhan_report():
     # --- Theory 2 Section ---
     report += "🎯 **2. TRADE SIGNAL (3 ITM Strikes OI Rule):**\n"
 
-    if oi_data and "error" not in oi_data:
+    if oi_data:
         ce_oi = oi_data["ce_total_oi"]
         pe_oi = oi_data["pe_total_oi"]
         diff = oi_data["difference"]
