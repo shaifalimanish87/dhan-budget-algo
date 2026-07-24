@@ -1,138 +1,248 @@
-import os
+import datetime
 import requests
-import pandas as pd
 import yfinance as yf
-from ta.momentum import RSIIndicator
-from dhanhq import dhanhq as DhanClient
-from dhanhq.dhan_context import DhanContext
-from dotenv import load_dotenv
-
-load_dotenv()
+from dhanhq import dhanhq
+import os
 
 # ==================== CONFIGURATION ====================
-CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
-ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1112617852")
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
-if not ACCESS_TOKEN:
-    raise ValueError("❌ ERROR: DHAN_ACCESS_TOKEN nahi mila! GitHub Secrets check karein.")
+# Dhan Client Initialize
+dhan = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
 
-context = DhanContext(client_id=CLIENT_ID, access_token=ACCESS_TOKEN)
-dhan = DhanClient(context)
 
-MONITOR_INDICES = {
-    "NIFTY": {
-        "security_id": "13", 
-        "yf_symbol": "^NSEI", 
-        "lot_size": 65
-    },
-    "BANKNIFTY": {
-        "security_id": "25", 
-        "yf_symbol": "^NSEBANK", 
-        "lot_size": 30
+# ==================== HELPER FUNCTIONS ====================
+
+def format_lakhs(number):
+    """Numbers ko Lakhs (Lakh) me format karta hai"""
+    if number is None:
+        return "0.00 Lakh"
+    lakh_value = number / 100000
+    sign = "+" if lakh_value > 0 else ""
+    if lakh_value < 0:
+        return f"-{abs(lakh_value):.2f} Lakh"
+    elif lakh_value > 0:
+        return f"{sign}{lakh_value:.2f} Lakh"
+    else:
+        return "0.00 Lakh"
+
+
+def send_telegram_message(message):
+    """Telegram Alert Function"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
     }
-}
-
-def send_telegram_alert(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try: 
+    try:
         requests.post(url, json=payload)
-    except Exception as e: 
-        print(f"Telegram error: {e}")
-
-def get_live_data_yfinance(symbol):
-    try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period="1d", interval="5m")
-        if not df.empty:
-            spot_price = float(df["Close"].iloc[-1])
-            rsi_5m = float(RSIIndicator(close=df["Close"], window=min(14, len(df)-1)).rsi().iloc[-1])
-            return spot_price, rsi_5m
     except Exception as e:
-        print(f"yfinance error for {symbol}: {e}")
-    return 0.0, 50.0
+        print(f"Telegram Error: {e}")
 
-def fetch_option_chain_data(security_id):
+
+def get_current_expiry_date():
+    """Dhan API se live expiry list me se sabse paas wali expiry auto-fetch karta hai"""
     try:
-        chain = dhan.get_option_chain(security_id=int(security_id), exchange_segment="NSE_FNO")
-        if chain and chain.get('status') == 'success' and 'data' in chain:
-            data = chain['data']
-            df = pd.DataFrame(data if isinstance(data, list) else data.get('oc', []))
-            
-            if not df.empty and 'option_type' in df.columns and 'open_interest' in df.columns:
-                total_call_oi = df[df['option_type'] == 'CE']['open_interest'].sum()
-                total_put_oi = df[df['option_type'] == 'PE']['open_interest'].sum()
-                pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
-                return pcr, df
-    except Exception as e: 
-        print(f"Option Chain Error: {e}")
-    return 1.0, None
+        exp_data = dhan.get_expiry_list(under_security_id=13, under_exchange_segment="NSE_INDEX")
+        if exp_data.get("status") == "success" and exp_data.get("data"):
+            expiry_dates = sorted(exp_data["data"])
+            today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+            valid_expiries = [exp for exp in expiry_dates if exp >= today_str]
+            if valid_expiries:
+                return valid_expiries[0]
+    except Exception as e:
+        print(f"Expiry Fetch Error: {e}")
+    return datetime.datetime.now().strftime("%Y-%m-%d")
 
-def run_trading_engine():
-    print("🚀 PRO-MODE: Auto-Trigger Scan Started...")
-    now = pd.Timestamp.now(tz='Asia/Kolkata')
-    
-    # Live market hours check (9:15 AM to 3:30 PM IST)
-    if now.weekday() >= 5 or now.hour < 9 or (now.hour == 9 and now.minute < 15) or (now.hour >= 15 and now.minute > 30):
-        print("💤 Market is currently closed. Exiting safely.")
-        return
 
-    diagnostics = []
+# ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
 
-    for index_name, info in MONITOR_INDICES.items():
-        sec_id = info["security_id"]
-        yf_symbol = info["yf_symbol"]
-        lot_size = info["lot_size"]
+def get_market_news_and_macro_sentiment():
+    """Theory 1: Global Cues aur FII/DII Sentiment Check"""
+    sentiment_score = 0
+    cues_summary = []
 
-        # Realtime Spot & RSI
-        current_spot, rsi_5m = get_live_data_yfinance(yf_symbol)
-        
-        # Realtime Option Chain & PCR
-        pcr, chain_df = fetch_option_chain_data(sec_id)
+    tickers = {
+        "S&P 500": "^GSPC",
+        "Nasdaq": "^IXIC",
+        "GIFT Nifty": "^NSEI"
+    }
 
-        diagnostics.append(f"📊 *{index_name}*: Spot ₹{current_spot:.1f} | RSI 5m: {rsi_5m:.1f} | PCR: {pcr:.2f}")
+    for name, ticker in tickers.items():
+        try:
+            data = yf.Ticker(ticker).history(period="2d")
+            if len(data) >= 2:
+                prev_close = data["Close"].iloc[-2]
+                curr_close = data["Close"].iloc[-1]
+                p_change = ((curr_close - prev_close) / prev_close) * 100
 
-        # EASY & SUPER RESPONSIVE SIGNAL LOGIC
-        signal = None
-        if rsi_5m >= 52 or pcr > 1.02:
-            signal = "CE"
-        elif rsi_5m <= 48 or pcr < 0.98:
-            signal = "PE"
-
-        if signal and chain_df is not None:
-            price_col = 'last_traded_price' if 'last_traded_price' in chain_df.columns else ('last_price' if 'last_price' in chain_df.columns else None)
-            
-            if price_col:
-                budget_contracts = chain_df[(chain_df['option_type'] == signal) & (chain_df[price_col] >= 1) & (chain_df[price_col] <= 350)]
+                if p_change > 0.3:
+                    sentiment_score += 1
+                elif p_change < -0.3:
+                    sentiment_score -= 1
                 
-                if not budget_contracts.empty:
-                    best_contract = budget_contracts.sort_values(by=price_col, ascending=False).iloc[0]
-                    live_premium = float(best_contract[price_col])
-                    strike_price = best_contract.get('strike_price', 'ATM')
-                    total_lot_cost = round(live_premium * lot_size, 2)
-                    
-                    target_premium = round(live_premium * 1.25, 2)
-                    sl_premium = round(live_premium * 0.90, 2)
+                sign = "+" if p_change > 0 else ""
+                cues_summary.append(f"{name}: `{sign}{p_change:.2f}%`")
+        except Exception:
+            pass
 
-                    msg = (
-                        f"🎯 *🔥 FAST TRADE SIGNAL: {index_name} 🔥*\n"
-                        f"-------------------------------------\n"
-                        f"📈 *Action:* BUY {strike_price} {signal}\n"
-                        f"💵 *Premium:* ₹{live_premium} (Lot Cost: ₹{total_lot_cost})\n"
-                        f"-------------------------------------\n"
-                        f"🚀 *Target (25%):* ₹{target_premium}\n"
-                        f"🛑 *StopLoss (10%):* ₹{sl_premium}\n"
-                        f"-------------------------------------\n"
-                        f"📍 *Spot:* ₹{current_spot:.1f} | *RSI 5m:* {rsi_5m:.1f} | *PCR:* {pcr:.2f}"
-                    )
-                    send_telegram_alert(msg)
+    try:
+        url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=5)
+        
+        if "Net Buy" in res.text or "Buy" in res.text:
+            sentiment_score += 1
+            fii_status = "Net Buyers 🟢"
+        else:
+            sentiment_score -= 1
+            fii_status = "Net Sellers 🔴"
+    except Exception:
+        fii_status = "Data Unavailable"
 
-    if diagnostics:
-        send_telegram_alert("🔍 *LIVE SCAN REPORT*\n" + "\n".join(diagnostics))
+    if sentiment_score >= 2:
+        sentiment = "🟢 **BULLISH (Global Cues & FII Positive)**"
+    elif sentiment_score <= -2:
+        sentiment = "🔴 **BEARISH (Global Cues & FII Negative)**"
+    else:
+        sentiment = "🟡 **NEUTRAL / MIXED (Cues Sideways)**"
 
-    print("🔄 Execution successfully completed.")
+    return sentiment, cues_summary, fii_status
+
+
+# ==================== THEORY 2: 3 ITM STRIKES OI LOGIC ====================
+
+def get_nifty_itm_oi_analysis():
+    """Theory 2: Live 3 ITM CE vs PE OI Analysis"""
+    try:
+        quote_data = dhan.get_market_quote(
+            exchange_segment=dhan.NSE_FNO, security_id="13"
+        )
+
+        if quote_data.get("status") != "success":
+            return None
+
+        spot_price = quote_data["data"]["last_price"]
+        strike_step = 50
+        atm_strike = round(spot_price / strike_step) * strike_step
+
+        current_expiry = get_current_expiry_date()
+
+        oc_response = dhan.option_chain(
+            under_security_id=13,
+            under_exchange_segment="NSE_INDEX",
+            expiry=current_expiry,
+        )
+
+        if oc_response.get("status") != "success":
+            return {
+                "spot_price": spot_price,
+                "atm_strike": atm_strike,
+                "ce_total_oi": 0,
+                "pe_total_oi": 0,
+                "difference": 0,
+                "error": "Option chain fetch failed",
+            }
+
+        oc_data = oc_response.get("data", {})
+
+        itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
+        itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
+
+        ce_total_oi = 0
+        pe_total_oi = 0
+
+        for item in oc_data:
+            strike = item.get("strike_price")
+
+            if strike in itm_ce_strikes and "ce" in item:
+                ce_total_oi += item["ce"].get("oi", 0)
+
+            if strike in itm_pe_strikes and "pe" in item:
+                pe_total_oi += item["pe"].get("oi", 0)
+
+        difference = ce_total_oi - pe_total_oi
+
+        return {
+            "spot_price": spot_price,
+            "atm_strike": atm_strike,
+            "ce_total_oi": ce_total_oi,
+            "pe_total_oi": pe_total_oi,
+            "difference": difference,
+        }
+
+    except Exception as e:
+        print(f"Error calculating ITM OI: {e}")
+        return None
+
+
+# ==================== REPORT GENERATOR ====================
+
+def generate_dhan_report():
+    today = datetime.datetime.now().strftime("%d-%b-%Y %I:%M %p")
+
+    macro_sentiment, global_cues, fii_status = get_market_news_and_macro_sentiment()
+    oi_data = get_nifty_itm_oi_analysis()
+
+    report = f"⚡ **DHAN LIVE MARKET ALERT (15 Min Update)** ⚡\n📅 `{today}`\n\n"
+
+    # --- Theory 1 Section ---
+    report += "📰 **1. MARKET SENTIMENT (News & Macro Data):**\n"
+    report += f"• **Overall Bias:** {macro_sentiment}\n"
+    report += f"• **FII/DII Trend:** `{fii_status}`\n"
+    if global_cues:
+        report += f"• **Global Cues:** " + ", ".join(global_cues) + "\n"
+    report += "\n" + "─" * 25 + "\n\n"
+
+    # --- Theory 2 Section ---
+    report += "🎯 **2. TRADE SIGNAL (3 ITM Strikes OI Rule):**\n"
+
+    if oi_data and "error" not in oi_data:
+        ce_oi = oi_data["ce_total_oi"]
+        pe_oi = oi_data["pe_total_oi"]
+        diff = oi_data["difference"]
+
+        trade_signal = "🟡 **NO CLEAR SIGNAL (WAIT & WATCH)**"
+
+        if pe_oi > 0 and ce_oi >= (pe_oi * 1.25):
+            trade_signal = "🔴 **BUY PE (Call Writers Heavy by 25%+)**"
+        elif ce_oi > 0 and pe_oi >= (ce_oi * 1.25):
+            trade_signal = "🟢 **BUY CE (Put Writers Heavy by 25%+)**"
+
+        report += f"• **Signal:** {trade_signal}\n"
+        report += f"• **Nifty Spot:** `{oi_data['spot_price']}` (ATM: `{oi_data['atm_strike']}`)\n\n"
+
+        ce_lakhs = format_lakhs(ce_oi).replace("+", "")
+        pe_lakhs = format_lakhs(pe_oi).replace("+", "")
+        diff_lakhs = format_lakhs(diff)
+
+        report += "🔢 **3 ITM Strikes OI Breakup:**\n"
+        report += f"• Total CE ITM OI: `{ce_lakhs}`\n"
+        report += f"• Total PE ITM OI: `{pe_lakhs}`\n"
+        report += f"• Difference (CE - PE): `{diff_lakhs}`\n\n"
+    else:
+        report += "⚠️ *Option chain data fetch failed.*\n\n"
+
+    report += "💡 *Note: Automatic 15-minute interval live update.*"
+
+    return report
+
 
 if __name__ == "__main__":
-    run_trading_engine()
+    now = datetime.datetime.now()
+    if now.weekday() < 5:
+        market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        
+        if market_start <= now <= market_end:
+            print(f"[{now.strftime('%I:%M %p')}] Executing 15-Min Live Data & Sending Telegram Alert...")
+            report = generate_dhan_report()
+            send_telegram_message(report)
+        else:
+            print(f"[{now.strftime('%I:%M %p')}] Outside Market Hours (09:15 AM - 03:30 PM).")
+    else:
+        print("Weekend - Market Closed.")
