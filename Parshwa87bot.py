@@ -278,17 +278,17 @@ if __name__ == "__main__":
     tz_ist = pytz.timezone('Asia/Kolkata')
     now = datetime.datetime.now(tz_ist)
     
+    # Check: Monday to Friday ONLY
     if now.weekday() < 5:
         market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
         
+        # Sirf live market hours ke dauran hi alert jayega
         if market_start <= now <= market_end:
-            print(f"[{now.strftime('%I:%M %p IST')}] Executing 15-Min Live Data...")
+            print(f"[{now.strftime('%I:%M %p IST')}] Market Open: Executing 15-Min Live Data Alert...")
             report = generate_dhan_report()
             send_telegram_message(report)
         else:
-            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours. Test Trigger...")
-            report = generate_dhan_report()
-            send_telegram_message(report)
+            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours (9:15 AM - 3:30 PM). Alert Skipped.")
     else:
-        print("Weekend - Market Closed.")
+        print("Weekend - Market Closed. Alert Skipped.")
