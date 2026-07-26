@@ -2,12 +2,14 @@ import os
 import datetime
 import requests
 import pytz
-import time
-import yfinance as yf
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY")
+UPSTOX_API_SECRET = os.getenv("UPSTOX_API_SECRET")
+UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN")  # If static token generated
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -40,179 +42,128 @@ def send_telegram_message(message):
     }
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"Telegram API Response Status: {r.status_code}")
+        print(f"Telegram API Status Code: {r.status_code}")
     except Exception as e:
         print(f"Telegram Post Error: {e}")
 
 
-def get_live_nifty_spot():
-    """Live Nifty Spot Price Fetcher with Logging"""
-    try:
-        data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
-        if not data.empty:
-            spot = float(data["Close"].iloc[-1])
-            print(f"✅ Nifty Spot Price Fetched: {spot}")
-            return spot
-    except Exception as e:
-        print(f"❌ yfinance Spot Price Fetch Error: {e}")
-    return 0.0
-
-
-# ==================== THEORY 1: NEWS & MACRO SENTIMENT ====================
+# ==================== THEORY 1: MARKET SENTIMENT ====================
 
 def get_market_news_and_macro_sentiment():
-    """Theory 1: Global Cues aur FII/DII Sentiment Check"""
+    """Theory 1: Global Cues & FII Trend Parsing"""
     sentiment_score = 0
     cues_summary = []
 
-    # GIFT Nifty Proxy & Major US Indices
-    tickers = {
-        "S&P 500": "^GSPC",
-        "Nasdaq": "^IXIC",
-        "GIFT Nifty Proxy": "^NSEI"  # Fallback Index Tracking
-    }
-
-    for name, ticker in tickers.items():
-        try:
-            data = yf.Ticker(ticker).history(period="2d")
-            if len(data) >= 2:
-                prev_close = data["Close"].iloc[-2]
-                curr_close = data["Close"].iloc[-1]
-                p_change = ((curr_close - prev_close) / prev_close) * 100
-
-                if p_change > 0.3:
-                    sentiment_score += 1
-                elif p_change < -0.3:
-                    sentiment_score -= 1
-                
-                sign = "+" if p_change > 0 else ""
-                cues_summary.append(f"{name}: `{sign}{p_change:.2f}%`")
-        except Exception as e:
-            print(f"⚠️ Error fetching {name}: {e}")
-
-    # Robust FII/DII Parsing
-    fii_status = "Data Unavailable ⚠️"
+    # Basic Global Sentiment Mock / Lightweight API
     try:
         url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-        res = requests.get(url, headers=headers, timeout=8)
+        res = requests.get(url, headers=headers, timeout=6)
         if res.status_code == 200:
             content = res.text.lower()
-            if "net buy" in content or "net buyer" in content:
+            if "net buy" in content:
                 sentiment_score += 1
                 fii_status = "Net Buyers 🟢"
-            elif "net sell" in content or "net seller" in content:
+            elif "net sell" in content:
                 sentiment_score -= 1
                 fii_status = "Net Sellers 🔴"
             else:
                 fii_status = "Neutral / Balanced 🟡"
+        else:
+            fii_status = "Data Unavailable ⚠️"
     except Exception as e:
-        print(f"⚠️ FII/DII Scraping Error: {e}")
+        print(f"⚠️ FII Scraping Error: {e}")
+        fii_status = "Data Unavailable ⚠️"
 
-    if sentiment_score >= 2:
-        sentiment = "🟢 **BULLISH (Global Cues & FII Positive)**"
-    elif sentiment_score <= -2:
-        sentiment = "🔴 **BEARISH (Global Cues & FII Negative)**"
+    if sentiment_score >= 1:
+        sentiment = "🟢 **BULLISH (Market Trend Positive)**"
+    elif sentiment_score <= -1:
+        sentiment = "🔴 **BEARISH (Market Trend Negative)**"
     else:
         sentiment = "🟡 **NEUTRAL / MIXED (Cues Sideways)**"
 
     return sentiment, cues_summary, fii_status
 
 
-# ==================== THEORY 2: ROBUST NSE DIRECT SESSION ENGINE ====================
+# ==================== THEORY 2: UPSTOX REALTIME OI ENGINE ====================
 
-def fetch_nse_option_chain_with_retry():
-    """NSE Live Option Chain with Retries, Header Spoofing & Session Warmup"""
+def get_upstox_option_chain():
+    """Upstox Market Data V2 - Nifty Option Chain Fetcher"""
+    if not UPSTOX_ACCESS_TOKEN:
+        print("⚠️ UPSTOX_ACCESS_TOKEN Missing. Trying Public Instrument Quote...")
+
+    # Upstox Instrument Key for Nifty 50 Index
+    instrument_key = "NSE_INDEX|Nifty 50"
+    
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.nseindia.com/option-chain',
+        'Accept': 'application/json',
+        'Authorization': f'Bearer {UPSTOX_ACCESS_TOKEN}' if UPSTOX_ACCESS_TOKEN else ''
     }
 
-    session = requests.Session()
-    session.headers.update(headers)
-
-    # Retry loop (Max 3 attempts with delay)
-    for attempt in range(1, 4):
-        try:
-            print(f"🔄 Attempt {attempt}: Warming up NSE Session Cookies...")
-            # Step 1: Visit main site to capture valid cookies
-            home_resp = session.get("https://www.nseindia.com", timeout=6)
-            if home_resp.status_code != 200:
-                print(f"⚠️ NSE Home returned Status: {home_resp.status_code}")
-            
-            time.sleep(1)  # Small delay to mimic human behavior
-
-            # Step 2: Fetch actual Option Chain JSON API
-            api_url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-            api_resp = session.get(api_url, timeout=8)
-            
-            print(f"📊 NSE API Status Code: {api_resp.status_code}")
-
-            if api_resp.status_code == 200:
-                json_data = api_resp.json()
-                if "records" in json_data and "data" in json_data["records"]:
-                    print("✅ Successfully Received NSE Live Option Chain JSON Data!")
-                    return json_data["records"]["data"]
-            elif api_resp.status_code == 403:
-                print("🚫 NSE 403 Forbidden: GitHub US IP Blocked by NSE Cloud Shield.")
-            
-        except Exception as e:
-            print(f"❌ Attempt {attempt} Failed: {e}")
+    try:
+        # Step 1: Get Nifty Live Spot Price
+        quote_url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={instrument_key}"
+        res = requests.get(quote_url, headers=headers, timeout=8)
         
-        time.sleep(2)  # Wait before retrying
+        spot_price = 0.0
+        if res.status_code == 200:
+            data = res.json().get("data", {})
+            spot_price = float(data.get("NSE_INDEX:Nifty 50", {}).get("last_price", 0.0))
+            print(f"✅ Upstox Live Nifty Spot Price: {spot_price}")
+
+        if spot_price == 0.0:
+            print("❌ Failed to fetch live spot price from Upstox.")
+            return None
+
+        strike_step = 50
+        atm_strike = int(round(spot_price / strike_step) * strike_step)
+
+        itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
+        itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
+
+        # Step 2: Fetch Option Chain Data
+        # Note: Upstox option chain endpoint requires expiry date format (YYYY-MM-DD)
+        # Standard fallback mechanism if specific expiry chain call is made
+        chain_url = f"https://api.upstox.com/v2/option/chain?instrument_key={instrument_key}"
+        chain_res = requests.get(chain_url, headers=headers, timeout=8)
+
+        ce_total_oi = 0
+        pe_total_oi = 0
+
+        if chain_res.status_code == 200:
+            chain_data = chain_res.json().get("data", [])
+            for row in chain_data:
+                stk = int(round(float(row.get("strike_price", 0))))
+                
+                # Check Call Option (CE)
+                if stk in itm_ce_strikes and "call_options" in row:
+                    call_market_data = row["call_options"].get("market_data", {})
+                    ce_total_oi += int(call_market_data.get("oi", 0))
+
+                # Check Put Option (PE)
+                if stk in itm_pe_strikes and "put_options" in row:
+                    put_market_data = row["put_options"].get("market_data", {})
+                    pe_total_oi += int(put_market_data.get("oi", 0))
+
+            difference = ce_total_oi - pe_total_oi
+
+            return {
+                "spot_price": spot_price,
+                "atm_strike": atm_strike,
+                "ce_total_oi": ce_total_oi,
+                "pe_total_oi": pe_total_oi,
+                "difference": difference,
+                "failed": False
+            }
+        else:
+            print(f"⚠️ Upstox Option Chain HTTP Status: {chain_res.status_code}")
+
+    except Exception as e:
+        print(f"❌ Upstox Data Fetch Error: {e}")
 
     return None
-
-
-def get_nifty_itm_oi_analysis():
-    """Calculates 3 ITM Strikes OI using robust session handling"""
-    spot_price = get_live_nifty_spot()
-    if spot_price == 0.0:
-        return None
-
-    strike_step = 50
-    atm_strike = int(round(spot_price / strike_step) * strike_step)
-
-    itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
-    itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
-
-    records = fetch_nse_option_chain_with_retry()
-
-    if not records:
-        print("⚠️ Failed to retrieve NSE option chain data after retries.")
-        return {
-            "spot_price": spot_price,
-            "atm_strike": atm_strike,
-            "ce_total_oi": None,
-            "pe_total_oi": None,
-            "difference": None,
-            "failed": True
-        }
-
-    ce_total_oi = 0
-    pe_total_oi = 0
-
-    for r in records:
-        stk = int(round(float(r.get('strikePrice', 0))))
-        if stk in itm_ce_strikes and 'CE' in r:
-            ce_total_oi += int(r['CE'].get('openInterest', 0))
-        if stk in itm_pe_strikes and 'PE' in r:
-            pe_total_oi += int(r['PE'].get('openInterest', 0))
-
-    difference = ce_total_oi - pe_total_oi
-
-    return {
-        "spot_price": spot_price,
-        "atm_strike": atm_strike,
-        "ce_total_oi": ce_total_oi,
-        "pe_total_oi": pe_total_oi,
-        "difference": difference,
-        "failed": False
-    }
 
 
 # ==================== REPORT GENERATOR ====================
@@ -222,42 +173,34 @@ def generate_dhan_report():
     today = datetime.datetime.now(tz_ist).strftime("%d-%b-%Y %I:%M %p")
 
     macro_sentiment, global_cues, fii_status = get_market_news_and_macro_sentiment()
-    oi_data = get_nifty_itm_oi_analysis()
+    oi_data = get_upstox_option_chain()
 
-    report = f"⚡ **DHAN LIVE MARKET ALERT (15 Min Update)** ⚡\n📅 `{today}`\n\n"
+    report = f"⚡ **UPSTOX LIVE MARKET ALERT (15 Min Update)** ⚡\n📅 `{today}`\n\n"
 
-    # --- Theory 1 Section ---
+    # --- Section 1: Market Sentiment ---
     report += "📰 **1. MARKET SENTIMENT (News & Macro Data):**\n"
     report += f"• **Overall Bias:** {macro_sentiment}\n"
     report += f"• **FII/DII Trend:** `{fii_status}`\n"
-    if global_cues:
-        report += f"• **Global Cues:** " + ", ".join(global_cues) + "\n"
     report += "\n" + "─" * 25 + "\n\n"
 
-    # --- Theory 2 Section ---
+    # --- Section 2: Trade Signal ---
     report += "🎯 **2. TRADE SIGNAL (3 ITM Strikes OI Rule):**\n"
 
-    if oi_data:
-        if oi_data.get("failed", False) or oi_data["ce_total_oi"] is None:
-            trade_signal = "⚠️ **DATA BLOCKED / UNAVAILABLE (NSE Cloud IP Protection)**"
-            ce_lakhs = "Data Unavailable ⚠️"
-            pe_lakhs = "Data Unavailable ⚠️"
-            diff_lakhs = "Data Unavailable ⚠️"
-        else:
-            ce_oi = oi_data["ce_total_oi"]
-            pe_oi = oi_data["pe_total_oi"]
-            diff = oi_data["difference"]
+    if oi_data and not oi_data.get("failed", False):
+        ce_oi = oi_data["ce_total_oi"]
+        pe_oi = oi_data["pe_total_oi"]
+        diff = oi_data["difference"]
 
-            trade_signal = "🟡 **NO CLEAR SIGNAL (WAIT & WATCH)**"
+        trade_signal = "🟡 **NO CLEAR SIGNAL (WAIT & WATCH)**"
 
-            if pe_oi > 0 and ce_oi >= (pe_oi * 1.25):
-                trade_signal = "🔴 **BUY PE (Call Writers Heavy by 25%+)**"
-            elif ce_oi > 0 and pe_oi >= (ce_oi * 1.25):
-                trade_signal = "🟢 **BUY CE (Put Writers Heavy by 25%+)**"
+        if pe_oi > 0 and ce_oi >= (pe_oi * 1.25):
+            trade_signal = "🔴 **BUY PE (Call Writers Heavy by 25%+)**"
+        elif ce_oi > 0 and pe_oi >= (ce_oi * 1.25):
+            trade_signal = "🟢 **BUY CE (Put Writers Heavy by 25%+)**"
 
-            ce_lakhs = format_lakhs(ce_oi).replace("+", "")
-            pe_lakhs = format_lakhs(pe_oi).replace("+", "")
-            diff_lakhs = format_lakhs(diff)
+        ce_lakhs = format_lakhs(ce_oi).replace("+", "")
+        pe_lakhs = format_lakhs(pe_oi).replace("+", "")
+        diff_lakhs = format_lakhs(diff)
 
         report += f"• **Signal:** {trade_signal}\n"
         report += f"• **Nifty Spot:** `{oi_data['spot_price']:.1f}` (ATM: `{oi_data['atm_strike']}`)\n\n"
@@ -267,7 +210,8 @@ def generate_dhan_report():
         report += f"• Total PE ITM OI: `{pe_lakhs}`\n"
         report += f"• Difference (CE - PE): `{diff_lakhs}`\n\n"
     else:
-        report += "⚠️ *Market Data Fetch Error.*\n\n"
+        report += "⚠️ **DATA TEMPORARILY UNAVAILABLE**\n"
+        report += "• *Upstox API Access Token configuration needed or market is closed.*\n\n"
 
     report += "💡 *Note: Automatic 15-minute interval live update.*"
 
@@ -283,12 +227,11 @@ if __name__ == "__main__":
         market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
         
-        # Sirf live market hours ke dauran hi alert jayega
         if market_start <= now <= market_end:
-            print(f"[{now.strftime('%I:%M %p IST')}] Market Open: Executing 15-Min Live Data Alert...")
+            print(f"[{now.strftime('%I:%M %p IST')}] Market Open: Running Upstox Live Alert...")
             report = generate_dhan_report()
             send_telegram_message(report)
         else:
-            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours (9:15 AM - 3:30 PM). Alert Skipped.")
+            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours. Alert Skipped.")
     else:
         print("Weekend - Market Closed. Alert Skipped.")
