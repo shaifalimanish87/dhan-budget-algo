@@ -249,8 +249,21 @@ def generate_dhan_report():
     return report
 
 
-# ==================== TEST EXECUTION TRIGGER ====================
+# ==================== LIVE MARKET EXECUTION ====================
 if __name__ == "__main__":
-    print("Testing Telegram Alert Right Now...")
-    report = generate_dhan_report()
-    send_telegram_message(report)
+    tz_ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.datetime.now(tz_ist)
+    
+    # Check Market Hours (Monday-Friday 9:15 AM to 3:30 PM IST)
+    if now.weekday() < 5:
+        market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        
+        if market_start <= now <= market_end:
+            print(f"[{now.strftime('%I:%M %p IST')}] Live Market Execution...")
+            report = generate_dhan_report()
+            send_telegram_message(report)
+        else:
+            print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours. Alert Skipped.")
+    else:
+        print(f"[{now.strftime('%I:%M %p IST')}] Weekend - Market Closed. Alert Skipped.")
