@@ -2,6 +2,7 @@ import os
 import datetime
 import requests
 import pytz
+import yfinance as yf
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -47,6 +48,17 @@ def send_telegram_message(message):
         print(f"Telegram Post Error: {e}")
 
 
+def get_live_nifty_spot_fallback():
+    """Backup Spot Price using yfinance if Upstox Token is absent/closed"""
+    try:
+        data = yf.Ticker("^NSEI").history(period="1d", interval="1m")
+        if not data.empty:
+            return float(data["Close"].iloc[-1])
+    except Exception as e:
+        print(f"yfinance Fallback Error: {e}")
+    return 0.0
+
+
 # ==================== THEORY 1: MARKET SENTIMENT ====================
 
 def get_market_news_and_macro_sentiment():
@@ -90,36 +102,51 @@ def get_market_news_and_macro_sentiment():
 
 def get_upstox_option_chain():
     """Upstox Market Data V2 - Nifty Option Chain Fetcher"""
-    if not UPSTOX_ACCESS_TOKEN:
-        print("⚠️ UPSTOX_ACCESS_TOKEN Missing in Secrets.")
+    spot_price = 0.0
 
     instrument_key = "NSE_INDEX|Nifty 50"
-    
     headers = {
         'Accept': 'application/json',
         'Authorization': f'Bearer {UPSTOX_ACCESS_TOKEN}' if UPSTOX_ACCESS_TOKEN else ''
     }
 
+    # 1. Try Upstox Spot Price
+    if UPSTOX_ACCESS_TOKEN:
+        try:
+            quote_url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={instrument_key}"
+            res = requests.get(quote_url, headers=headers, timeout=8)
+            if res.status_code == 200:
+                data = res.json().get("data", {})
+                spot_price = float(data.get("NSE_INDEX:Nifty 50", {}).get("last_price", 0.0))
+                print(f"✅ Upstox Live Nifty Spot Price: {spot_price}")
+        except Exception as e:
+            print(f"Upstox Spot Price Fetch Error: {e}")
+
+    # 2. Backup Spot Price if Upstox failed or token missing
+    if spot_price == 0.0:
+        spot_price = get_live_nifty_spot_fallback()
+        print(f"ℹ️ Fallback Nifty Spot Price Used: {spot_price}")
+
+    if spot_price == 0.0:
+        return None
+
+    strike_step = 50
+    atm_strike = int(round(spot_price / strike_step) * strike_step)
+
+    itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
+    itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
+
+    if not UPSTOX_ACCESS_TOKEN:
+        return {
+            "spot_price": spot_price,
+            "atm_strike": atm_strike,
+            "ce_total_oi": None,
+            "pe_total_oi": None,
+            "difference": None,
+            "failed": True
+        }
+
     try:
-        quote_url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={instrument_key}"
-        res = requests.get(quote_url, headers=headers, timeout=8)
-        
-        spot_price = 0.0
-        if res.status_code == 200:
-            data = res.json().get("data", {})
-            spot_price = float(data.get("NSE_INDEX:Nifty 50", {}).get("last_price", 0.0))
-            print(f"✅ Upstox Live Nifty Spot Price: {spot_price}")
-
-        if spot_price == 0.0:
-            print("❌ Failed to fetch live spot price from Upstox (Market closed or Token missing).")
-            return None
-
-        strike_step = 50
-        atm_strike = int(round(spot_price / strike_step) * strike_step)
-
-        itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
-        itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
-
         chain_url = f"https://api.upstox.com/v2/option/chain?instrument_key={instrument_key}"
         chain_res = requests.get(chain_url, headers=headers, timeout=8)
 
@@ -149,13 +176,17 @@ def get_upstox_option_chain():
                 "difference": difference,
                 "failed": False
             }
-        else:
-            print(f"⚠️ Upstox Option Chain HTTP Status: {chain_res.status_code}")
-
     except Exception as e:
         print(f"❌ Upstox Data Fetch Error: {e}")
 
-    return None
+    return {
+        "spot_price": spot_price,
+        "atm_strike": atm_strike,
+        "ce_total_oi": None,
+        "pe_total_oi": None,
+        "difference": None,
+        "failed": True
+    }
 
 
 # ==================== REPORT GENERATOR ====================
@@ -178,52 +209,57 @@ def generate_dhan_report():
     # --- Section 2: Trade Signal ---
     report += "🎯 **2. TRADE SIGNAL (3 ITM Strikes OI Rule):**\n"
 
-    if oi_data and not oi_data.get("failed", False):
-        ce_oi = oi_data["ce_total_oi"]
-        pe_oi = oi_data["pe_total_oi"]
-        diff = oi_data["difference"]
+    if oi_data:
+        spot = oi_data["spot_price"]
+        atm = oi_data["atm_strike"]
 
-        trade_signal = "🟡 **NO CLEAR SIGNAL (WAIT & WATCH)**"
+        if oi_data.get("failed", False) or oi_data["ce_total_oi"] is None:
+            trade_signal = "⚠️ **DATA TEMPORARILY UNAVAILABLE**"
+            ce_lakhs = "Data Unavailable ⚠️"
+            pe_lakhs = "Data Unavailable ⚠️"
+            diff_lakhs = "Data Unavailable ⚠️"
+        else:
+            ce_oi = oi_data["ce_total_oi"]
+            pe_oi = oi_data["pe_total_oi"]
+            diff = oi_data["difference"]
 
-        if pe_oi > 0 and ce_oi >= (pe_oi * 1.25):
-            trade_signal = "🔴 **BUY PE (Call Writers Heavy by 25%+)**"
-        elif ce_oi > 0 and pe_oi >= (ce_oi * 1.25):
-            trade_signal = "🟢 **BUY CE (Put Writers Heavy by 25%+)**"
+            trade_signal = "🟡 **NO CLEAR SIGNAL (WAIT & WATCH)**"
 
-        ce_lakhs = format_lakhs(ce_oi).replace("+", "")
-        pe_lakhs = format_lakhs(pe_oi).replace("+", "")
-        diff_lakhs = format_lakhs(diff)
+            if pe_oi > 0 and ce_oi >= (pe_oi * 1.25):
+                trade_signal = "🔴 **BUY PE (Call Writers Heavy by 25%+)**"
+            elif ce_oi > 0 and pe_oi >= (ce_oi * 1.25):
+                trade_signal = "🟢 **BUY CE (Put Writers Heavy by 25%+)**"
+
+            ce_lakhs = format_lakhs(ce_oi).replace("+", "")
+            pe_lakhs = format_lakhs(pe_oi).replace("+", "")
+            diff_lakhs = format_lakhs(diff)
 
         report += f"• **Signal:** {trade_signal}\n"
-        report += f"• **Nifty Spot:** `{oi_data['spot_price']:.1f}` (ATM: `{oi_data['atm_strike']}`)\n\n"
+        report += f"• **Nifty Spot:** `{spot:.1f}` (ATM: `{atm}`)\n\n"
 
         report += "🔢 **3 ITM Strikes OI Breakup:**\n"
         report += f"• Total CE ITM OI: `{ce_lakhs}`\n"
         report += f"• Total PE ITM OI: `{pe_lakhs}`\n"
         report += f"• Difference (CE - PE): `{diff_lakhs}`\n\n"
     else:
-        report += "⚠️ **DATA TEMPORARILY UNAVAILABLE**\n"
-        report += "• *Market is closed or Upstox API token is updating.*\n\n"
+        report += "⚠️ *Market Data Fetch Error.*\n\n"
 
     report += "💡 *Note: Automatic 15-minute interval live update.*"
 
     return report
 
+
 if __name__ == "__main__":
-    print("Testing Telegram Alert Right Now...")
-    report = generate_dhan_report()
-    send_telegram_message(report)
-
-
-
+    tz_ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.datetime.now(tz_ist)
     
-    # Monday to Friday market hours filter
+    # Check Market Hours (Monday-Friday 9:15 AM to 3:30 PM IST)
     if now.weekday() < 5:
         market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
         
         if market_start <= now <= market_end:
-            print(f"[{now.strftime('%I:%M %p IST')}] Running Live Market Alert...")
+            print(f"[{now.strftime('%I:%M %p IST')}] Live Market Execution...")
             report = generate_dhan_report()
             send_telegram_message(report)
         else:
