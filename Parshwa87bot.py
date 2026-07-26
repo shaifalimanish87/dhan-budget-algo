@@ -9,7 +9,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY")
 UPSTOX_API_SECRET = os.getenv("UPSTOX_API_SECRET")
-UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN")  # If static token generated
+UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN")
 
 
 # ==================== HELPER FUNCTIONS ====================
@@ -54,7 +54,6 @@ def get_market_news_and_macro_sentiment():
     sentiment_score = 0
     cues_summary = []
 
-    # Basic Global Sentiment Mock / Lightweight API
     try:
         url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/"
         headers = {
@@ -92,9 +91,8 @@ def get_market_news_and_macro_sentiment():
 def get_upstox_option_chain():
     """Upstox Market Data V2 - Nifty Option Chain Fetcher"""
     if not UPSTOX_ACCESS_TOKEN:
-        print("⚠️ UPSTOX_ACCESS_TOKEN Missing. Trying Public Instrument Quote...")
+        print("⚠️ UPSTOX_ACCESS_TOKEN Missing in Secrets.")
 
-    # Upstox Instrument Key for Nifty 50 Index
     instrument_key = "NSE_INDEX|Nifty 50"
     
     headers = {
@@ -103,7 +101,6 @@ def get_upstox_option_chain():
     }
 
     try:
-        # Step 1: Get Nifty Live Spot Price
         quote_url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={instrument_key}"
         res = requests.get(quote_url, headers=headers, timeout=8)
         
@@ -114,7 +111,7 @@ def get_upstox_option_chain():
             print(f"✅ Upstox Live Nifty Spot Price: {spot_price}")
 
         if spot_price == 0.0:
-            print("❌ Failed to fetch live spot price from Upstox.")
+            print("❌ Failed to fetch live spot price from Upstox (Market closed or Token missing).")
             return None
 
         strike_step = 50
@@ -123,9 +120,6 @@ def get_upstox_option_chain():
         itm_ce_strikes = [atm_strike, atm_strike - strike_step, atm_strike - (2 * strike_step)]
         itm_pe_strikes = [atm_strike, atm_strike + strike_step, atm_strike + (2 * strike_step)]
 
-        # Step 2: Fetch Option Chain Data
-        # Note: Upstox option chain endpoint requires expiry date format (YYYY-MM-DD)
-        # Standard fallback mechanism if specific expiry chain call is made
         chain_url = f"https://api.upstox.com/v2/option/chain?instrument_key={instrument_key}"
         chain_res = requests.get(chain_url, headers=headers, timeout=8)
 
@@ -137,12 +131,10 @@ def get_upstox_option_chain():
             for row in chain_data:
                 stk = int(round(float(row.get("strike_price", 0))))
                 
-                # Check Call Option (CE)
                 if stk in itm_ce_strikes and "call_options" in row:
                     call_market_data = row["call_options"].get("market_data", {})
                     ce_total_oi += int(call_market_data.get("oi", 0))
 
-                # Check Put Option (PE)
                 if stk in itm_pe_strikes and "put_options" in row:
                     put_market_data = row["put_options"].get("market_data", {})
                     pe_total_oi += int(put_market_data.get("oi", 0))
@@ -211,7 +203,7 @@ def generate_dhan_report():
         report += f"• Difference (CE - PE): `{diff_lakhs}`\n\n"
     else:
         report += "⚠️ **DATA TEMPORARILY UNAVAILABLE**\n"
-        report += "• *Upstox API Access Token configuration needed or market is closed.*\n\n"
+        report += "• *Market is closed or Upstox API token is updating.*\n\n"
 
     report += "💡 *Note: Automatic 15-minute interval live update.*"
 
@@ -219,21 +211,19 @@ def generate_dhan_report():
 
 
 if __name__ == "__main__":
-    print("Running Test Execution...")
-    report = generate_dhan_report()
-    send_telegram_message(report)
-
+    tz_ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.datetime.now(tz_ist)
     
-    # Check: Monday to Friday ONLY
+    # Monday to Friday market hours filter
     if now.weekday() < 5:
         market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
         
         if market_start <= now <= market_end:
-            print(f"[{now.strftime('%I:%M %p IST')}] Market Open: Running Upstox Live Alert...")
+            print(f"[{now.strftime('%I:%M %p IST')}] Running Live Market Alert...")
             report = generate_dhan_report()
             send_telegram_message(report)
         else:
             print(f"[{now.strftime('%I:%M %p IST')}] Outside Market Hours. Alert Skipped.")
     else:
-        print("Weekend - Market Closed. Alert Skipped.")
+        print(f"[{now.strftime('%I:%M %p IST')}] Weekend - Market Closed. Alert Skipped.")
