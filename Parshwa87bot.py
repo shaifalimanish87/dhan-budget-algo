@@ -209,10 +209,13 @@ def generate_dhan_report():
 
     return report
 
-
 if __name__ == "__main__":
-    tz_ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.datetime.now(tz_ist)
+    print("Testing Telegram Alert Right Now...")
+    report = generate_dhan_report()
+    send_telegram_message(report)
+
+
+
     
     # Monday to Friday market hours filter
     if now.weekday() < 5:
